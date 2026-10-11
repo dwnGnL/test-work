@@ -25,78 +25,72 @@ type migration struct {
 // Migrate применяет к базе все ещё не применённые миграции из fsys.
 //
 // Файлы *.sql в корне fsys идут по порядку имён; применённые версии записываются
-// в public.schema_migrations. Каждая миграция выполняется в своей транзакции вместе
-// с записью о ней: после сбоя в базе либо вся миграция, либо ничего. На время работы
-// берётся advisory-блокировка, поэтому два инстанса, стартующих одновременно, не
-// мигрируют параллельно: второй дожидается первого и видит уже применённые версии.
-func Migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, log *slog.Logger) (err error) {
+// в public.schema_migrations. Весь прогон — одна транзакция, и первым делом она берёт
+// pg_advisory_xact_lock: два инстанса, стартующих одновременно, не мигрируют параллельно,
+// второй дожидается коммита первого и видит уже применённые версии. Блокировка
+// транзакционная, поэтому снимается сама на коммите или откате (и при обрыве соединения),
+// отдельно разблокировать и привязывать работу к одному соединению не нужно.
+//
+// Цена единой транзакции: сбой любой миграции откатывает весь прогон, в том числе
+// миграции, которые в нём уже выполнились (на пустой базе не останется даже
+// schema_migrations). В базе остаются только версии, применённые прошлыми запусками.
+// Для миграций из этого репозитория это приемлемо: после исправления следующий старт
+// просто повторит прогон. Операторы, которые нельзя выполнять в транзакции
+// (например, CREATE INDEX CONCURRENTLY), в такие файлы класть нельзя.
+func Migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, log *slog.Logger) error {
 	migrations, err := readMigrations(fsys)
 	if err != nil {
 		return err
 	}
 
-	// Блокировка привязана к сессии, поэтому всё делаем на одном соединении.
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire connection: %w", err)
-	}
-	defer conn.Release()
-
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrateLockKey); err != nil {
-		return fmt.Errorf("acquire migration lock: %w", err)
-	}
-	defer func() {
-		// Разблокируем на контексте без отмены: иначе при отмене ctx блокировка
-		// осталась бы за соединением, вернувшимся в пул.
-		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
-		defer cancel()
-		var unlocked bool
-		uerr := conn.QueryRow(uctx, "SELECT pg_advisory_unlock($1)", migrateLockKey).Scan(&unlocked)
-		if uerr == nil && unlocked {
-			return
+	var applied []string
+	err = InTx(ctx, pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", migrateLockKey); err != nil {
+			return fmt.Errorf("acquire migration lock: %w", err)
 		}
-		// Состояние блокировки неизвестно: закрываем сессию, это снимает блокировку.
-		_ = conn.Hijack().Close(uctx)
-		if err == nil {
-			err = fmt.Errorf("release migration lock: %v (unlocked=%t)", uerr, unlocked)
+
+		// Под блокировкой: параллельные CREATE TABLE IF NOT EXISTS друг с другом не конфликтуют.
+		if _, err := tx.Exec(ctx, `
+			CREATE TABLE IF NOT EXISTS public.schema_migrations (
+				version    TEXT PRIMARY KEY,
+				applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+			)`); err != nil {
+			return fmt.Errorf("create schema_migrations: %w", err)
 		}
-	}()
 
-	if _, err := conn.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS public.schema_migrations (
-			version    TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		)`); err != nil {
-		return fmt.Errorf("create schema_migrations: %w", err)
-	}
+		done, err := appliedVersions(ctx, tx)
+		if err != nil {
+			return err
+		}
 
-	applied, err := appliedVersions(ctx, conn)
+		for _, m := range migrations {
+			if done[m.version] {
+				continue
+			}
+			// Без аргументов pgx использует simple protocol, и в файле может быть много операторов.
+			if _, err := tx.Exec(ctx, m.sql); err != nil {
+				return fmt.Errorf("apply migration %s: %w", m.version, err)
+			}
+			if _, err := tx.Exec(ctx, "INSERT INTO public.schema_migrations (version) VALUES ($1)", m.version); err != nil {
+				return fmt.Errorf("apply migration %s: record version: %w", m.version, err)
+			}
+			applied = append(applied, m.version)
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
 
-	for _, m := range migrations {
-		if applied[m.version] {
-			continue
-		}
-		err := InTx(ctx, conn, func(tx pgx.Tx) error {
-			// Без аргументов pgx использует simple protocol, и в файле может быть много операторов.
-			if _, err := tx.Exec(ctx, m.sql); err != nil {
-				return err
-			}
-			_, err := tx.Exec(ctx, "INSERT INTO public.schema_migrations (version) VALUES ($1)", m.version)
-			return err
-		})
-		if err != nil {
-			return fmt.Errorf("apply migration %s: %w", m.version, err)
-		}
-		log.Info("migration applied", "version", m.version)
+	// Пишем в лог только после коммита: до него «применено» ещё не гарантировано.
+	for _, v := range applied {
+		log.Info("migration applied", "version", v)
 	}
 	return nil
 }
 
-func appliedVersions(ctx context.Context, conn *pgxpool.Conn) (map[string]bool, error) {
-	rows, err := conn.Query(ctx, "SELECT version FROM public.schema_migrations")
+func appliedVersions(ctx context.Context, tx pgx.Tx) (map[string]bool, error) {
+	rows, err := tx.Query(ctx, "SELECT version FROM public.schema_migrations")
 	if err != nil {
 		return nil, fmt.Errorf("read schema_migrations: %w", err)
 	}

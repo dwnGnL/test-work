@@ -78,6 +78,7 @@ func TestMigrateConcurrentRunners(t *testing.T) {
 	}
 }
 
+// Весь прогон — одна транзакция: сбой любой миграции откатывает и те, что в нём уже выполнились.
 func TestMigrateOrderAndRollback(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
@@ -91,23 +92,75 @@ func TestMigrateOrderAndRollback(t *testing.T) {
 	}
 
 	err := postgres.Migrate(ctx, pool, fsys, discardLog())
-	if err == nil {
-		t.Fatal("expected error from the failing migration")
+	if err == nil || !strings.Contains(err.Error(), "0002_b") {
+		t.Fatalf("err = %v, want an error naming migration 0002_b", err)
 	}
-	if got := versions(t, pool); len(got) != 1 || got[0] != "0001_a" {
-		t.Errorf("after failure applied = %v, want [0001_a]", got)
+	// Откатилось всё: и сбойная 0002_b, и успешная 0001_a, и сама таблица учёта.
+	for _, table := range []string{"public.a", "public.b", "public.schema_migrations"} {
+		if exists(t, pool, table) {
+			t.Errorf("table %s exists: the failed run was not rolled back as a whole", table)
+		}
 	}
-	if exists(t, pool, "public.b") {
-		t.Error("table b exists: failed migration was not rolled back")
-	}
+	assertNoAdvisoryLocks(t, pool)
 
-	// Чиним миграцию: раннер добирает только недостающую.
+	// Чиним миграцию: следующий прогон применяет всё.
 	fsys["0002_b.sql"] = &fstest.MapFile{Data: []byte(`CREATE TABLE b (id int);`)}
 	if err := postgres.Migrate(ctx, pool, fsys, discardLog()); err != nil {
 		t.Fatal(err)
 	}
-	if got := versions(t, pool); len(got) != 2 || got[1] != "0002_b" {
+	if got := versions(t, pool); !slices.Equal(got, []string{"0001_a", "0002_b"}) {
 		t.Errorf("applied = %v, want [0001_a 0002_b]", got)
+	}
+
+	// Версии, применённые прошлыми запусками, сбой нового прогона не трогает;
+	// миграция нового прогона, выполненная до сбоя, откатывается вместе с ним.
+	fsys["0003_c.sql"] = &fstest.MapFile{Data: []byte(`CREATE TABLE c (id int);`)}
+	fsys["0004_d.sql"] = &fstest.MapFile{Data: []byte(`SELECT 1/0;`)}
+	if err := postgres.Migrate(ctx, pool, fsys, discardLog()); err == nil {
+		t.Fatal("expected error from the failing migration")
+	}
+	if got := versions(t, pool); !slices.Equal(got, []string{"0001_a", "0002_b"}) {
+		t.Errorf("after the second failure applied = %v, want [0001_a 0002_b]", got)
+	}
+	if exists(t, pool, "public.c") {
+		t.Error("table c exists: 0003_c should have been rolled back with the failed run")
+	}
+	assertNoAdvisoryLocks(t, pool)
+}
+
+// Блокировка транзакционная: после успешного и после неудачного прогона никто её не держит.
+func TestMigrateReleasesLock(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+
+	if err := postgres.Migrate(ctx, pool, migrations.FS, discardLog()); err != nil {
+		t.Fatal(err)
+	}
+	assertNoAdvisoryLocks(t, pool)
+
+	// Отменённый контекст: прогон падает, блокировка и соединение не остаются за пулом.
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := postgres.Migrate(cctx, pool, migrations.FS, discardLog()); err == nil {
+		t.Error("expected error for cancelled context")
+	}
+	assertNoAdvisoryLocks(t, pool)
+	assertNoOpenTransaction(t, pool)
+}
+
+// assertNoAdvisoryLocks проверяет, что в текущей базе нет advisory-блокировок.
+func assertNoAdvisoryLocks(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	var n int
+	err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM pg_locks
+		WHERE locktype = 'advisory'
+		  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("%d advisory locks are still held", n)
 	}
 }
 
