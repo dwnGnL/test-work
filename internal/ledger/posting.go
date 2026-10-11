@@ -24,6 +24,21 @@ var (
 	ErrKeyConflict    = errors.New("ledger: idempotency key is already used with different content")
 )
 
+// KeyConflictError уточняет ErrKeyConflict: под ключом уже записана проводка вида StoredKind.
+// Обработчику платежей это нужно, чтобы отличить штатный исход гонки (по платежу уже
+// проведён другой исход: зачисление вместо возврата или наоборот) от ошибки в содержимом.
+type KeyConflictError struct {
+	Key        string
+	StoredKind string
+}
+
+func (e *KeyConflictError) Error() string {
+	return fmt.Sprintf("%v: key %q, stored kind %q", ErrKeyConflict, e.Key, e.StoredKind)
+}
+
+// Is сохраняет проверку errors.Is(err, ErrKeyConflict).
+func (e *KeyConflictError) Is(target error) bool { return target == ErrKeyConflict }
+
 // Line — одна проводка со знаком: дебет > 0, кредит < 0.
 type Line struct {
 	Account string
@@ -96,7 +111,8 @@ func (p Posting) validate() error {
 //   - posted = true: ключ был свободен, заголовок и все проводки записаны;
 //   - posted = false, err = nil: проводка с этим ключом и тем же содержимым уже есть,
 //     ничего не записано (безопасный повтор — после рестарта и при гонке тоже);
-//   - ErrKeyConflict: ключ занят проводкой с другим содержимым, ничего не записано;
+//   - ErrKeyConflict (*KeyConflictError с видом уже записанной проводки): ключ занят
+//     проводкой с другим содержимым, ничего не записано;
 //   - ErrUnknownAccount: счёта нет, ничего не записано.
 //
 // Параллельные вызовы с одним ключом выстраивает уникальный индекс: проигравший ждёт
@@ -180,7 +196,7 @@ func checkStored(ctx context.Context, tx pgx.Tx, p Posting) error {
 	}
 
 	if kind != p.Kind || !sameLines(stored, p.Lines) {
-		return fmt.Errorf("%w: %q", ErrKeyConflict, p.Key)
+		return &KeyConflictError{Key: p.Key, StoredKind: kind}
 	}
 	return nil
 }

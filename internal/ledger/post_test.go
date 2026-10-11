@@ -152,6 +152,12 @@ func TestPostKeyConflict(t *testing.T) {
 			if posted || !errors.Is(err, ledger.ErrKeyConflict) {
 				t.Errorf("posted = %v, err = %v; want false, ErrKeyConflict", posted, err)
 			}
+			// Ошибка называет вид уже записанной проводки: по ней обработчик понимает,
+			// какой исход победил.
+			var conflict *ledger.KeyConflictError
+			if !errors.As(err, &conflict) || conflict.Key != original.Key || conflict.StoredKind != original.Kind {
+				t.Errorf("err = %#v; want KeyConflictError{Key: %q, StoredKind: %q}", err, original.Key, original.Kind)
+			}
 			if txs2, entries2 := journalSize(t, pool); txs2 != txs || entries2 != entries {
 				t.Errorf("journal changed: %d transactions, %d entries; want %d and %d", txs2, entries2, txs, entries)
 			}
