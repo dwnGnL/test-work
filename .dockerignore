@@ -1,0 +1,17 @@
+.git
+.gitignore
+.idea
+.DS_Store
+.env
+
+# не нужно для сборки
+docs
+logs
+NOTES.md
+README.md
+bin
+*.test
+*.out
+Dockerfile
+docker-compose.yml
+.dockerignore
