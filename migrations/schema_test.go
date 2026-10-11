@@ -26,14 +26,15 @@ var moduleSchemas = []string{"partners", "invoices", "chainsim", "scanner", "pay
 // Единственное исключение — демо-сид 0008, он явно помечен в самом файле.
 func TestMigrationsTouchOnlyOwnSchema(t *testing.T) {
 	own := map[string][]string{
-		"0001_partners.sql":  {"partners"},
-		"0002_invoices.sql":  {"invoices"},
-		"0003_chainsim.sql":  {"chainsim"},
-		"0004_scanner.sql":   {"scanner"},
-		"0005_payments.sql":  {"payments"},
-		"0006_ledger.sql":    {"ledger"},
-		"0007_refunds.sql":   {"refunds"},
-		"0008_seed_demo.sql": {"partners", "ledger"}, // демо-данные: partner:{id} подставляется подзапросом
+		"0001_partners.sql":         {"partners"},
+		"0002_invoices.sql":         {"invoices"},
+		"0003_chainsim.sql":         {"chainsim"},
+		"0004_scanner.sql":          {"scanner"},
+		"0005_payments.sql":         {"payments"},
+		"0006_ledger.sql":           {"ledger"},
+		"0007_refunds.sql":          {"refunds"},
+		"0008_seed_demo.sql":        {"partners", "ledger"}, // демо-данные: partner:{id} подставляется подзапросом
+		"0009_ledger_hardening.sql": {"ledger"},
 	}
 	refRe := regexp.MustCompile(`\b(` + strings.Join(moduleSchemas, "|") + `)\.[a-z_]`)
 

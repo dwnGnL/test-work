@@ -3,7 +3,10 @@ package postgres_test
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"testing/fstest"
@@ -30,15 +33,9 @@ func TestMigrateAppliesAllAndIsIdempotent(t *testing.T) {
 		}
 	}
 
-	var n int
-	var first, last string
-	err := pool.QueryRow(ctx,
-		`SELECT count(*), min(version), max(version) FROM public.schema_migrations`).Scan(&n, &first, &last)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 8 || first != "0001_partners" || last != "0008_seed_demo" {
-		t.Errorf("schema_migrations: count=%d first=%q last=%q", n, first, last)
+	want := embeddedVersions(t)
+	if got := versions(t, pool); !slices.Equal(got, want) {
+		t.Errorf("schema_migrations = %v, want %v", got, want)
 	}
 }
 
@@ -69,8 +66,8 @@ func TestMigrateConcurrentRunners(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM public.schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 8 {
-		t.Errorf("applied %d migrations, want 8", n)
+	if want := len(embeddedVersions(t)); n != want {
+		t.Errorf("applied %d migrations, want %d", n, want)
 	}
 	var partners int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM partners.partners`).Scan(&partners); err != nil {
@@ -186,6 +183,20 @@ func TestInTx(t *testing.T) {
 			t.Error("expected error for cancelled context")
 		}
 	})
+}
+
+// embeddedVersions — версии вшитых миграций по порядку имён. Число миграций растёт,
+// поэтому тесты сверяются с каталогом, а не с константой.
+func embeddedVersions(t *testing.T) []string {
+	t.Helper()
+	files, err := fs.Glob(migrations.FS, "*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, f := range files {
+		files[i] = strings.TrimSuffix(f, ".sql")
+	}
+	return files // Glob отдаёт имена отсортированными
 }
 
 func versions(t *testing.T, pool *pgxpool.Pool) []string {
