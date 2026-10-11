@@ -50,7 +50,7 @@ func PartnerBalance(ctx context.Context, q Querier, partnerID int64) (money.Amou
 }
 
 // Totals возвращает сальдо по всем счетам (со знаком, как Balance), включая счета без проводок.
-// Сумма по всем счетам обязана быть нулём: это проверка для тестов и сверки. Читает всю
+// Сумма по всем счетам обязана быть нулём; саму проверку делает CheckBalanced. Читает всю
 // таблицу проводок, в обработчиках запросов её вызывать не нужно.
 func Totals(ctx context.Context, q Querier) (map[string]money.Amount, error) {
 	rows, err := q.Query(ctx, `
@@ -75,4 +75,22 @@ func Totals(ctx context.Context, q Querier) (map[string]money.Amount, error) {
 		return nil, fmt.Errorf("ledger: totals: %w", err)
 	}
 	return totals, nil
+}
+
+// ErrBooksUnbalanced — сумма всех проводок журнала не равна нулю.
+var ErrBooksUnbalanced = errors.New("ledger: books are not balanced")
+
+// CheckBalanced проверяет главный инвариант двойной записи: сумма всех проводок равна нулю.
+// Триггер базы гарантирует это для каждой транзакции журнала, поэтому ошибка здесь означает,
+// что журнал меняли в обход триггеров. Нужна сверке и тестам; читает всю таблицу проводок.
+func CheckBalanced(ctx context.Context, q Querier) error {
+	var sum money.Amount
+	err := q.QueryRow(ctx, `SELECT COALESCE(sum(amount), 0)::bigint FROM ledger.entries`).Scan(&sum)
+	if err != nil {
+		return fmt.Errorf("ledger: check balanced: %w", err)
+	}
+	if sum != 0 {
+		return fmt.Errorf("%w: sum of all entries is %s", ErrBooksUnbalanced, sum)
+	}
+	return nil
 }
