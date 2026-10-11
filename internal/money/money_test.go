@@ -277,7 +277,8 @@ func feeBig(amount Amount, bps int) Amount {
 func TestFeeBpsMatchesBigIntReference(t *testing.T) {
 	rnd := rand.New(rand.NewPCG(42, 7))
 	amounts := []Amount{0, 1, 2, 3, 4999, 5000, 5001, 9999, 10_000, 10_001, 1_000_000,
-		math.MaxInt64, math.MaxInt64 - 1, math.MaxInt64 / 2, math.MaxInt64/2 + 1, 1 << 62, 1<<62 - 1}
+		math.MaxInt64, math.MaxInt64 - 1, math.MaxInt64 / 2, math.MaxInt64/2 + 1, 1 << 62, 1<<62 - 1,
+		math.MaxInt64 - 5807, math.MaxInt64 - 5808} // остаток от деления на 10000: 0 и 9999 при максимальном частном
 	rates := []int{0, 1, 2, 50, 150, 4999, 5000, 5001, 9999, 10_000}
 
 	check := func(a Amount, bps int) {

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/bits"
 	"strconv"
 	"strings"
 )
@@ -122,9 +121,13 @@ func (a *Amount) UnmarshalJSON(data []byte) error {
 // maxBps — 100% в базисных пунктах.
 const maxBps = 10_000
 
-// FeeBps возвращает комиссию в базисных пунктах: (amount × bps + 5000) / 10000
-// в целых, то есть округление до ближайшего, половина вверх. Произведение
-// считается в 128 битах, поэтому переполнения нет даже на math.MaxInt64.
+// FeeBps возвращает комиссию в базисных пунктах: floor((amount × bps + 5000) / 10000),
+// то есть округление до ближайшего, половина вверх.
+//
+// Произведение amount × bps может не поместиться в int64, поэтому его не считаем.
+// Пусть amount = 10000·q + r, 0 ≤ r < 10000. Слагаемое 10000·q·bps делится на 10000
+// нацело, его можно вынести из-под floor: результат = q·bps + floor((r·bps + 5000) / 10000).
+// Переполнения нет: q·bps ≤ amount (bps ≤ 10000), а r·bps + 5000 < 10⁸.
 //
 // Аргументы вне допустимых границ (amount < 0, bps вне 0..10000) — ошибка
 // программиста, а не данных: в базе их не пропускают CHECK-ограничения.
@@ -133,11 +136,7 @@ func FeeBps(amount Amount, bps int) Amount {
 	if amount < 0 || bps < 0 || bps > maxBps {
 		panic(fmt.Sprintf("money: FeeBps: invalid arguments amount=%d bps=%d", int64(amount), bps))
 	}
-	hi, lo := bits.Mul64(uint64(amount), uint64(bps))
-	lo, carry := bits.Add64(lo, maxBps/2, 0)
-	hi += carry
-	// hi < maxBps всегда: произведение меньше 2^63 × 10^4, так что Div64 не паникует,
-	// а частное не больше amount (bps ≤ 10000) и помещается в int64.
-	q, _ := bits.Div64(hi, lo, maxBps)
-	return Amount(q)
+	a, b := int64(amount), int64(bps)
+	q, r := a/maxBps, a%maxBps
+	return Amount(q*b + (r*b+maxBps/2)/maxBps)
 }
