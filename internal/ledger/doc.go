@@ -1,7 +1,35 @@
 // Package ledger — журнал двойной записи: единственное место, где меняются балансы.
 // Журнал только на добавление, сумма проводок транзакции равна нулю, повтор по ключу идемпотентности безопасен.
 //
-// Схема Postgres: ledger (accounts, transactions, entries); инварианты держат триггеры базы.
+// Схема Postgres: ledger (accounts, transactions, entries); инварианты держат триггеры базы,
+// а Post проверяет то же самое заранее и даёт внятные ошибки.
+//
+// Счета: assets:deposits, hold:aml, refunds:payable, revenue:fees и partner:{id}
+// (см. константы и PartnerAccount). Партнёр, комиссия сервиса и холд — разные счета,
+// поэтому их остатки не смешиваются; сумма сальдо по всем счетам (Totals) всегда ноль.
+//
+// Проводка — это Posting: ключ идемпотентности, вид и строки Line со знаком
+// (Debit > 0, Credit < 0). Пример — платёж 100 USDT с комиссией 1,5%:
+//
+//	// шаг 1: платёж прошёл порог, деньги в холде
+//	ledger.Post(ctx, tx, ledger.Posting{Key: id + ":1", Kind: "hold", Lines: []ledger.Line{
+//		ledger.Debit(ledger.AccountDeposits, gross),
+//		ledger.Credit(ledger.AccountHoldAML, gross),
+//	}})
+//	// шаг 2: AML пропустил — партнёру за вычетом комиссии
+//	ledger.Post(ctx, tx, ledger.Posting{Key: id + ":2", Kind: "credit", Lines: []ledger.Line{
+//		ledger.Debit(ledger.AccountHoldAML, gross),
+//		ledger.Credit(ledger.PartnerAccount(partnerID), net),
+//		ledger.Credit(ledger.AccountRevenueFees, fee),
+//	}})
+//
+// Правила вызова:
+//   - Post пишет в транзакцию вызывающего (pgx.Tx), чтобы статус платежа и проводка
+//     коммитились вместе; после ошибки вызывающий откатывает транзакцию;
+//   - ключ — {payment_id}:{шаг}; зачисление и возврат — один шаг с одним ключом, так что
+//     вторая из двух взаимоисключающих проводок получает ErrKeyConflict, а не проходит;
+//   - счёт партнёра создаёт EnsureAccount до первой проводки по нему;
+//   - строк с нулевой суммой быть не может: нулевую комиссию просто не добавляем.
 //
 // Границы модуля: SQL модуля обращается только к его схеме; ссылки на сущности
 // других модулей хранятся как id без внешних ключей; вызовы между модулями
