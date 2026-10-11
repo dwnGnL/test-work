@@ -1,0 +1,11 @@
+# рабочие файлы, не часть сдачи
+NOTES.md
+logs/
+.idea/
+.DS_Store
+
+# сборка
+/bin/
+*.test
+*.out
+.env
