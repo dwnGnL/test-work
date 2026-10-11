@@ -25,9 +25,13 @@ services:
       db:
         condition: service_healthy
     restart: on-failure
+    # Сервер ждёт завершения запросов до 10 с (shutdownTimeout в cmd/server), а compose по умолчанию
+    # убивает контейнер через те же 10 с. Запас, чтобы остановка не обрывалась SIGKILL.
+    stop_grace_period: 20s
     ports:
       # Порт на хосте настраивается: 8080 часто занят другими проектами.
-      - "${APP_PORT:-18080}:8080"
+      # Наружу только на localhost: в базе демо-партнёры с публичными ключами (миграция 0008).
+      - "127.0.0.1:${APP_PORT:-18080}:8080"
     environment:
       DATABASE_URL: postgres://payments:payments@db:5432/payments?sslmode=disable
       HTTP_ADDR: ":8080"
