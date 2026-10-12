@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dwnGnL/test-work/internal/config"
+	"github.com/dwnGnL/test-work/internal/httpapi"
 	"github.com/dwnGnL/test-work/internal/partners"
 	"github.com/dwnGnL/test-work/internal/platform/postgres"
 	"github.com/dwnGnL/test-work/migrations"
@@ -57,12 +58,9 @@ func run(log *slog.Logger) error {
 		log.Info("demo partners are ready", "names", "alpha, beta")
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", healthHandler(pool, log))
-
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           mux,
+		Handler:           httpapi.New(pool, log, cfg.InvoiceTTL),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
