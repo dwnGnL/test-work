@@ -366,10 +366,10 @@ func TestNetworkErrorLeavesBlockUnprocessed(t *testing.T) {
 	f.send(usdtTo(t, inv.DepositAddress, "25"))
 	f.mine(1)
 
-	// Сеть «не знает» блок — как eth_getLogs по выброшенному блоку.
-	sc := f.newScanner(unknownBlockChain{f.sim})
-	if err := sc.Tick(context.Background()); !errors.Is(err, chain.ErrBlockNotFound) {
-		t.Fatalf("Tick error = %v, want ErrBlockNotFound", err)
+	errDown := errors.New("network is down")
+	sc := f.newScanner(failingTransfersChain{f.sim, errDown})
+	if err := sc.Tick(context.Background()); !errors.Is(err, errDown) {
+		t.Fatalf("Tick error = %v, want the network error", err)
 	}
 	if blocks := f.scannedBlocks(); len(blocks) != 0 {
 		t.Errorf("scanner blocks = %+v, want none", blocks)
@@ -380,11 +380,74 @@ func TestNetworkErrorLeavesBlockUnprocessed(t *testing.T) {
 	f.assertCursor(1)
 }
 
-// unknownBlockChain отвечает на запрос событий так, будто блок выброшен.
-type unknownBlockChain struct{ chain.Chain }
+// failingTransfersChain отвечает на запрос событий блока заданной ошибкой.
+type failingTransfersChain struct {
+	chain.Chain
+	err error
+}
 
-func (unknownBlockChain) Transfers(_ context.Context, blockHash string) ([]chain.Transfer, error) {
-	return nil, chain.ErrBlockNotFound
+func (c failingTransfersChain) Transfers(context.Context, string) ([]chain.Transfer, error) {
+	return nil, c.err
+}
+
+// Сеть выбросила блок между чтением заголовка и чтением его событий (так отвечает eth_getLogs
+// по неизвестному хэшу): это переписанная цепочка, а не сбой. Проход возвращается к сверке и
+// доходит до конца, в том числе подтверждает платёж, который уже набрал порог.
+func TestBlockDisappearsBeforeItsTransfers(t *testing.T) {
+	f := newFixture(t)
+	inv := f.newInvoice()
+
+	f.send(usdtTo(t, inv.DepositAddress, "25"))
+	f.mine(1)
+	f.tick() // блок 1 обработан, платёж detected
+	ready := f.onlyPayment(inv)
+
+	f.send(usdtTo(t, inv.DepositAddress, "10"))
+	f.mine(2) // блок 2 со вторым переводом и блок 3
+
+	rewritten := false
+	network := &hookChain{Chain: f.sim, beforeTransfers: func() {
+		if rewritten {
+			return
+		}
+		rewritten = true
+		f.reorg(2, false) // блоки 2 и 3 выброшены, второй перевод вернулся в мемпул
+		f.mine(2)         // новые блоки 2 (со вторым переводом) и 3
+	}}
+	if err := f.newScanner(network).Tick(context.Background()); err != nil {
+		t.Fatalf("Tick error = %v, want nil: a block that disappeared is a rewritten chain", err)
+	}
+	if !rewritten {
+		t.Fatal("the test did not rewrite the chain")
+	}
+
+	list := f.payments(inv)
+	if len(list) != 2 {
+		t.Fatalf("payments = %+v, want two", list)
+	}
+	if list[0].ID != ready.ID || list[0].Status != payments.StatusAMLPending {
+		t.Errorf("first payment = %+v, want the same one in aml_pending: the pass must reach the confirmation", list[0])
+	}
+	if list[1].Status != payments.StatusDetected || list[1].BlockNumber == nil || *list[1].BlockNumber != 2 {
+		t.Errorf("second payment = %+v, want detected in the new block 2", list[1])
+	}
+	f.assertHold(amt(t, "25"))
+	f.assertCursor(3)
+}
+
+// Если сеть каждый раз «не знает» блок, который сама только что отдала, проход заканчивается
+// ErrChainUnstable, а не зацикливается; блок не записан.
+func TestMissingBlockEveryTimeStopsThePass(t *testing.T) {
+	f := newFixture(t)
+	f.mine(1)
+
+	sc := f.newScanner(failingTransfersChain{f.sim, chain.ErrBlockNotFound})
+	if err := sc.Tick(context.Background()); !errors.Is(err, scanner.ErrChainUnstable) {
+		t.Errorf("Tick error = %v, want ErrChainUnstable", err)
+	}
+	if blocks := f.scannedBlocks(); len(blocks) != 0 {
+		t.Errorf("scanner blocks = %+v, want none", blocks)
+	}
 }
 
 // Сеть переписала цепочку между чтением головы и чтением блока: parent_hash нового блока

@@ -271,9 +271,10 @@ func (f *fixture) logContains(s string) bool { return strings.Contains(f.logs.St
 // переписать цепочку в момент, когда сканер читает её.
 type hookChain struct {
 	chain.Chain
-	onHead      func()
-	onBlock     func(number int64)
-	onTransfers func(got []chain.Transfer) []chain.Transfer
+	onHead          func()
+	onBlock         func(number int64)
+	beforeTransfers func() // перед чтением событий блока: заголовок уже получен, событий ещё нет
+	onTransfers     func(got []chain.Transfer) []chain.Transfer
 }
 
 func (h *hookChain) Head(ctx context.Context) (int64, error) {
@@ -291,6 +292,9 @@ func (h *hookChain) Block(ctx context.Context, number int64) (chain.Block, bool,
 }
 
 func (h *hookChain) Transfers(ctx context.Context, blockHash string) ([]chain.Transfer, error) {
+	if h.beforeTransfers != nil {
+		h.beforeTransfers()
+	}
 	got, err := h.Chain.Transfers(ctx, blockHash)
 	if err != nil || h.onTransfers == nil {
 		return got, err

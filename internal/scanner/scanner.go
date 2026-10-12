@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -207,8 +208,8 @@ func (s *Scanner) onNetwork(ctx context.Context, b chain.Block) (bool, error) {
 // scanNew — шаг 3: читает блоки по одному от курсора + 1 до головы сети, но не больше maxBlocksPerTick
 // за раз. Возвращает номер курсора — последнего обработанного блока (0, если блоков нет): от него
 // считаются подтверждения. stable = false, если сеть переписала цепочку во время чтения (блока уже
-// нет, его parent_hash не совпал с нашим предыдущим блоком или сам курсор уже не лежит в сети):
-// нужна новая сверка.
+// нет, в том числе между заголовком и событиями, его parent_hash не совпал с нашим предыдущим
+// блоком или сам курсор уже не лежит в сети): нужна новая сверка.
 func (s *Scanner) scanNew(ctx context.Context, conn *pgxpool.Conn) (cursor int64, stable bool, err error) {
 	head, err := s.network.Head(ctx)
 	if err != nil {
@@ -228,7 +229,11 @@ func (s *Scanner) scanNew(ctx context.Context, conn *pgxpool.Conn) (cursor int64
 		if !found || (hasPrev && b.ParentHash != prev.Hash) {
 			return 0, false, nil
 		}
-		if err := s.processBlock(ctx, conn, b); err != nil {
+		err = s.processBlock(ctx, conn, b)
+		if errors.Is(err, chain.ErrBlockNotFound) {
+			return 0, false, nil // блок выброшен между заголовком и событиями: та же переписанная цепочка
+		}
+		if err != nil {
 			return 0, false, err
 		}
 		prev, hasPrev = b, true
