@@ -48,3 +48,16 @@ func TestProcessorHungAMLDoesNotBlockTheBatch(t *testing.T) {
 		t.Errorf("log = %q, want the timed out check to be logged", got)
 	}
 }
+
+// Новый платёж берётся сразу, даже если часы приложения отстают от часов базы. Время первой
+// проверки у платежа выставлено часами базы; раньше обработчик сравнивал его со своими часами и
+// при отставании не брал платёж, пока часы не «догонят».
+func TestProcessorTakesNewPaymentDespiteClockSkew(t *testing.T) {
+	e := newEnv(t)
+	id := e.seed("aa")
+	e.clock.Advance(-90 * time.Minute) // часы теста были на час впереди: теперь на полчаса позади базы
+
+	e.tick()
+
+	e.assertDecided(id, payments.StatusCredited, aml.VerdictLow)
+}

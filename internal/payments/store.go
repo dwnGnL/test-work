@@ -111,8 +111,10 @@ func markAMLPending(ctx context.Context, tx pgx.Tx, id, maxBlock int64) (amount 
 	return amount, true, nil
 }
 
-// claimForAML захватывает до limit платежей aml_pending, чья очередь проверки пришла
-// (next_attempt_at <= now), одним запросом: увеличивает aml_attempts и сдвигает next_attempt_at
+// claimForAML захватывает до limit платежей aml_pending, чья очередь проверки пришла: платёж ещё
+// ни разу не проверялся или его пауза истекла (next_attempt_at <= now). Новый платёж берётся без
+// оглядки на время: его next_attempt_at выставлен часами базы, а now приходит от приложения, и при
+// расхождении часов он ждал бы зря. Всё одним запросом: увеличивает aml_attempts и сдвигает next_attempt_at
 // на паузу, которая растёт с числом прошлых попыток: first, 2·first, 4·first ... не больше maxPause.
 // Дальше это «аренда» платежа на время паузы:
 //   - FOR UPDATE SKIP LOCKED: параллельный захват берёт другие платежи и не ждёт чужих блокировок;
@@ -131,7 +133,7 @@ func claimForAML(ctx context.Context, q Querier, now time.Time, limit int, first
 		    updated_at      = now()
 		WHERE id IN (
 			SELECT id FROM payments.payments
-			WHERE status = 'aml_pending' AND next_attempt_at <= $1::timestamptz
+			WHERE status = 'aml_pending' AND (aml_attempts = 0 OR next_attempt_at <= $1::timestamptz)
 			ORDER BY next_attempt_at, id
 			LIMIT $4
 			FOR UPDATE SKIP LOCKED)
