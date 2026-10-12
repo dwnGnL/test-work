@@ -4,8 +4,11 @@ import "errors"
 
 // Ошибки пакета. Возвращаются как есть или обёрнутыми, проверять через errors.Is.
 var (
-	ErrEmptyName     = errors.New("partners: empty name")
-	ErrEmptyAPIKey   = errors.New("partners: empty api key")
+	ErrEmptyName   = errors.New("partners: empty name")
+	ErrEmptyAPIKey = errors.New("partners: empty api key")
+	// ErrInvalidAPIKey — в ключе есть пробельные или управляющие символы. Такой ключ нельзя
+	// передать в заголовке Authorization без искажений: партнёр был бы создан, а войти не смог.
+	ErrInvalidAPIKey = errors.New("partners: api key must not contain spaces or control characters")
 	ErrInvalidFeeBps = errors.New("partners: fee must be between 0 and 10000 basis points")
 	// ErrAPIKeyTaken — ключ уже принадлежит другому партнёру (в базе уникален его sha256).
 	ErrAPIKeyTaken = errors.New("partners: api key is already taken")

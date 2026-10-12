@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 
@@ -25,7 +26,8 @@ type Partner struct {
 // откатится она — исчезнут и партнёр, и счёт, партнёра без счёта не бывает.
 // В базе лежит только sha256 от apiKey.
 //
-// Ошибки: ErrEmptyName, ErrEmptyAPIKey, ErrInvalidFeeBps — проверки до обращения к базе;
+// Ошибки: ErrEmptyName, ErrEmptyAPIKey, ErrInvalidAPIKey, ErrInvalidFeeBps — проверки до
+// обращения к базе;
 // ErrAPIKeyTaken — ключ уже занят (в том числе параллельным вызовом).
 func Create(ctx context.Context, tx pgx.Tx, name, apiKey string, feeBps int) (Partner, error) {
 	switch {
@@ -33,6 +35,8 @@ func Create(ctx context.Context, tx pgx.Tx, name, apiKey string, feeBps int) (Pa
 		return Partner{}, ErrEmptyName
 	case apiKey == "":
 		return Partner{}, ErrEmptyAPIKey
+	case strings.ContainsFunc(apiKey, isSpaceOrControl):
+		return Partner{}, ErrInvalidAPIKey
 	case feeBps < 0 || feeBps > maxFeeBps:
 		return Partner{}, fmt.Errorf("%w: got %d", ErrInvalidFeeBps, feeBps)
 	}
@@ -50,6 +54,10 @@ func Create(ctx context.Context, tx pgx.Tx, name, apiKey string, feeBps int) (Pa
 		return Partner{}, fmt.Errorf("partners: create ledger account for partner %d: %w", p.ID, err)
 	}
 	return p, nil
+}
+
+func isSpaceOrControl(r rune) bool {
+	return unicode.IsSpace(r) || unicode.IsControl(r)
 }
 
 // Authenticate находит партнёра по API-ключу. Пустой ключ и неизвестный ключ дают

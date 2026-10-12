@@ -116,6 +116,11 @@ func TestCreateValidation(t *testing.T) {
 		{"empty name", "", "k", 100, partners.ErrEmptyName},
 		{"blank name", "   ", "k", 100, partners.ErrEmptyName},
 		{"empty key", "shop", "", 100, partners.ErrEmptyAPIKey},
+		{"key with leading space", "shop", " k", 100, partners.ErrInvalidAPIKey},
+		{"key with trailing space", "shop", "k ", 100, partners.ErrInvalidAPIKey},
+		{"key with space inside", "shop", "a b", 100, partners.ErrInvalidAPIKey},
+		{"key with tab", "shop", "a\tb", 100, partners.ErrInvalidAPIKey},
+		{"key with newline", "shop", "a\nb", 100, partners.ErrInvalidAPIKey},
 		{"negative fee", "shop", "k", -1, partners.ErrInvalidFeeBps},
 		{"fee above 100%", "shop", "k", 10_001, partners.ErrInvalidFeeBps},
 	}
