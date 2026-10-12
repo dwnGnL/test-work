@@ -138,74 +138,33 @@ func Post(ctx context.Context, tx pgx.Tx, p Posting) (posted bool, err error) {
 
 	// Счета ищем до записи: неизвестный счёт не оставляет в транзакции ни заголовка,
 	// ни части проводок.
-	accountIDs, err := lookupAccounts(ctx, tx, p.Lines)
+	accountIDs, err := accountIDsByCode(ctx, tx, p.Lines)
 	if err != nil {
 		return false, err
 	}
 
-	var txID int64
-	err = tx.QueryRow(ctx, `
-		INSERT INTO ledger.transactions (idempotency_key, kind) VALUES ($1, $2)
-		ON CONFLICT (idempotency_key) DO NOTHING
-		RETURNING id`, p.Key, p.Kind).Scan(&txID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	txID, inserted, err := insertTransaction(ctx, tx, p.Key, p.Kind)
+	if err != nil {
+		return false, err
+	}
+	if !inserted {
 		// Ключ уже занят: ничего не вставляем, только сверяем содержимое.
 		return false, checkStored(ctx, tx, p)
 	}
-	if err != nil {
-		return false, fmt.Errorf("ledger: insert transaction %q: %w", p.Key, err)
-	}
 
-	for i, l := range p.Lines {
-		_, err := tx.Exec(ctx, `
-			INSERT INTO ledger.entries (transaction_id, account_id, amount) VALUES ($1, $2, $3)`,
-			txID, accountIDs[i], l.signed())
-		if err != nil {
-			return false, fmt.Errorf("ledger: insert entry for %q: %w", l.Account, err)
-		}
+	if err := insertEntries(ctx, tx, txID, accountIDs, entriesOf(p.Lines)); err != nil {
+		return false, err
 	}
 	return true, nil
-}
-
-// lookupAccounts возвращает id счетов в порядке строк; отсутствующий счёт — ErrUnknownAccount.
-func lookupAccounts(ctx context.Context, tx pgx.Tx, lines []Line) ([]int64, error) {
-	ids := make([]int64, len(lines))
-	for i, l := range lines {
-		err := tx.QueryRow(ctx, `SELECT id FROM ledger.accounts WHERE code = $1`, l.Account).Scan(&ids[i])
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("%w: %q", ErrUnknownAccount, l.Account)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("ledger: look up account %q: %w", l.Account, err)
-		}
-	}
-	return ids, nil
 }
 
 // checkStored сверяет сохранённую под ключом проводку с запрошенной: тот же вид и те же
 // строки (порядок не важен) — nil, иначе ErrKeyConflict.
 func checkStored(ctx context.Context, tx pgx.Tx, p Posting) error {
-	var txID int64
-	var kind string
-	err := tx.QueryRow(ctx, `SELECT id, kind FROM ledger.transactions WHERE idempotency_key = $1`,
-		p.Key).Scan(&txID, &kind)
+	kind, stored, err := loadStored(ctx, tx, p.Key)
 	if err != nil {
-		// Вставка только что упёрлась в этот заголовок, он обязан быть виден.
-		return fmt.Errorf("ledger: load transaction %q: %w", p.Key, err)
+		return err
 	}
-
-	rows, err := tx.Query(ctx, `
-		SELECT a.code, e.amount
-		FROM ledger.entries e JOIN ledger.accounts a ON a.id = e.account_id
-		WHERE e.transaction_id = $1`, txID)
-	if err != nil {
-		return fmt.Errorf("ledger: load entries of %q: %w", p.Key, err)
-	}
-	stored, err := pgx.CollectRows(rows, pgx.RowToStructByPos[entry])
-	if err != nil {
-		return fmt.Errorf("ledger: load entries of %q: %w", p.Key, err)
-	}
-
 	if kind != p.Kind || !sameEntries(stored, entriesOf(p.Lines)) {
 		return &KeyConflictError{Key: p.Key, StoredKind: kind}
 	}

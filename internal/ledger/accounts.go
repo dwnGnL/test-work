@@ -2,7 +2,6 @@ package ledger
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 
 	"github.com/jackc/pgx/v5"
@@ -26,10 +25,5 @@ func PartnerAccount(partnerID int64) string {
 // при гонке проигравший ждёт коммита победителя и ничего не делает.
 // Пишет в транзакцию вызывающего: если она откатится, счёт тоже исчезнет.
 func EnsureAccount(ctx context.Context, tx pgx.Tx, code string) error {
-	_, err := tx.Exec(ctx,
-		`INSERT INTO ledger.accounts (code) VALUES ($1) ON CONFLICT (code) DO NOTHING`, code)
-	if err != nil {
-		return fmt.Errorf("ledger: ensure account %q: %w", code, err)
-	}
-	return nil
+	return insertAccount(ctx, tx, code)
 }
