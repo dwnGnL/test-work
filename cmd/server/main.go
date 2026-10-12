@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"sync"
 	"syscall"
 	"time"
@@ -24,6 +25,12 @@ import (
 
 // shutdownTimeout — сколько ждём завершения текущих запросов при остановке.
 const shutdownTimeout = 10 * time.Second
+
+// blockScanner — то, что фоновому циклу нужно от сканера: один проход. Под него подходит
+// *scanner.Scanner, а тест подставляет заглушку.
+type blockScanner interface {
+	Tick(ctx context.Context) error
+}
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -127,10 +134,8 @@ func run(log *slog.Logger) error {
 	return nil
 }
 
-// scanLoop вызывает Tick сканера по таймеру, пока ctx не отменён. Ошибка прохода пишется в лог,
-// сканер продолжает со следующего прохода: курсор в базе, потерять нечего. Отмена контекста при
-// остановке сервиса ошибкой не считается.
-func scanLoop(ctx context.Context, s *scanner.Scanner, interval time.Duration, log *slog.Logger) {
+// scanLoop вызывает проход сканера по таймеру, пока ctx не отменён.
+func scanLoop(ctx context.Context, s blockScanner, interval time.Duration, log *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -138,9 +143,22 @@ func scanLoop(ctx context.Context, s *scanner.Scanner, interval time.Duration, l
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.Tick(ctx); err != nil && ctx.Err() == nil {
-				log.Error("scanner tick failed", "err", err)
-			}
+			scanOnce(ctx, s, log)
 		}
+	}
+}
+
+// scanOnce делает один проход. Ошибка и паника пишутся в лог, цикл продолжается со следующего
+// прохода: курсор в базе, потерять нечего. В нашем коде паник нет, но она возможна в библиотеке,
+// и без recover упал бы весь сервис, включая HTTP. Отмена контекста при остановке сервиса
+// ошибкой не считается.
+func scanOnce(ctx context.Context, s blockScanner, log *slog.Logger) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("scanner tick panicked", "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	if err := s.Tick(ctx); err != nil && ctx.Err() == nil {
+		log.Error("scanner tick failed", "err", err)
 	}
 }
