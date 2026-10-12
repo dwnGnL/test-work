@@ -5,12 +5,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/dwnGnL/test-work/internal/platform/postgres"
+	"github.com/dwnGnL/test-work/migrations"
 )
 
 // EnvURL — переменная окружения с адресом Postgres, на котором тесты могут создавать базы
@@ -57,6 +61,34 @@ func NewPool(t testing.TB) *pgxpool.Pool {
 		adminExec(cctx, t, url, "DROP DATABASE IF EXISTS "+quoted+" WITH (FORCE)")
 	})
 	return pool
+}
+
+// NewMigrated — NewPool с применёнными миграциями.
+func NewMigrated(t testing.TB) *pgxpool.Pool {
+	t.Helper()
+	pool := NewPool(t)
+	if err := postgres.Migrate(context.Background(), pool, migrations.FS, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return pool
+}
+
+// WarmUp заранее открывает все соединения пула. Иначе горутины теста получают соединения
+// по одному, по мере их открытия, и выполняются почти по очереди, а гонки не возникает.
+func WarmUp(t testing.TB, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	var conns []*pgxpool.Conn
+	for range pool.Config().MaxConns {
+		c, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+	}
+	for _, c := range conns {
+		c.Release()
+	}
 }
 
 // adminExec выполняет оператор отдельным соединением к базе из url.

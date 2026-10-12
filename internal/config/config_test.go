@@ -22,6 +22,7 @@ func TestLoadDefaults(t *testing.T) {
 		Confirmations: 3,
 		InvoiceTTL:    60 * time.Minute,
 		AMLBlacklist:  nil,
+		DemoSeed:      false,
 		USDTContract:  "0xdac17f958d2ee523a2206206994597c13d831ec7",
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -35,6 +36,7 @@ func TestLoadOverrides(t *testing.T) {
 		"HTTP_ADDR":     "127.0.0.1:9000",
 		"CONFIRMATIONS": "12",
 		"INVOICE_TTL":   "15m",
+		"DEMO_SEED":     "true",
 		"AML_BLACKLIST": " 0xAAAAaaaaAAAAaaaaAAAAaaaaAAAAaaaaAAAAaaaa , ,0x000000000000000000000000000000000000dEaD,",
 		"USDT_CONTRACT": "0x1111111111111111111111111111111111111111",
 	}))
@@ -50,6 +52,7 @@ func TestLoadOverrides(t *testing.T) {
 			"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"0x000000000000000000000000000000000000dead",
 		},
+		DemoSeed:     true,
 		USDTContract: "0x1111111111111111111111111111111111111111",
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -58,11 +61,11 @@ func TestLoadOverrides(t *testing.T) {
 }
 
 func TestLoadEmptyVarsUseDefaults(t *testing.T) {
-	cfg, err := load(env(map[string]string{"HTTP_ADDR": "  ", "CONFIRMATIONS": "", "INVOICE_TTL": ""}))
+	cfg, err := load(env(map[string]string{"HTTP_ADDR": "  ", "CONFIRMATIONS": "", "INVOICE_TTL": "", "DEMO_SEED": " "}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HTTPAddr != ":8080" || cfg.Confirmations != 3 || cfg.InvoiceTTL != time.Hour {
+	if cfg.HTTPAddr != ":8080" || cfg.Confirmations != 3 || cfg.InvoiceTTL != time.Hour || cfg.DemoSeed {
 		t.Errorf("empty variables must fall back to defaults, got %+v", cfg)
 	}
 }
@@ -82,6 +85,7 @@ func TestLoadErrors(t *testing.T) {
 		{"ttl negative", map[string]string{"INVOICE_TTL": "-5m"}, "INVOICE_TTL"},
 		{"contract too short", map[string]string{"USDT_CONTRACT": "0x1234"}, "USDT_CONTRACT"},
 		{"contract no prefix", map[string]string{"USDT_CONTRACT": "dAC17F958D2ee523a2206206994597C13D831ec7"}, "USDT_CONTRACT"},
+		{"demo seed not a boolean", map[string]string{"DEMO_SEED": "maybe"}, "DEMO_SEED"},
 		{"blacklist bad entry", map[string]string{"AML_BLACKLIST": "0x1111111111111111111111111111111111111111,nope"}, "AML_BLACKLIST"},
 	}
 	for _, tt := range tests {

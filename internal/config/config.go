@@ -34,6 +34,9 @@ type Config struct {
 	// AMLBlacklist — адреса отправителей с высоким риском для AML-мока
 	// (AML_BLACKLIST, через запятую). Адреса приведены к нижнему регистру.
 	AMLBlacklist []string
+	// DemoSeed — создавать ли демо-партнёров при старте (DEMO_SEED, по умолчанию false).
+	// Их API-ключи публичны, поэтому включают только для разработки и проверки сценария.
+	DemoSeed bool
 	// USDTContract — адрес контракта USDT (USDT_CONTRACT). Приведён к нижнему регистру:
 	// регистр в адресе Ethereum несёт только контрольную сумму, сравнивать надо без него.
 	USDTContract string
@@ -86,6 +89,14 @@ func load(getenv func(string) string) (Config, error) {
 		default:
 			cfg.InvoiceTTL = d
 		}
+	}
+
+	if v := get("DEMO_SEED", ""); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("DEMO_SEED: %q is not a boolean", v))
+		}
+		cfg.DemoSeed = b
 	}
 
 	contract, err := normalizeAddress(get("USDT_CONTRACT", defaultUSDTContract))

@@ -30,13 +30,15 @@ services:
     stop_grace_period: 20s
     ports:
       # Порт на хосте настраивается: 8080 часто занят другими проектами.
-      # Наружу только на localhost: в базе демо-партнёры с публичными ключами (миграция 0008).
+      # Наружу только на localhost: при DEMO_SEED в базе демо-партнёры с публичными ключами.
       - "127.0.0.1:${APP_PORT:-18080}:8080"
     environment:
       DATABASE_URL: postgres://payments:payments@db:5432/payments?sslmode=disable
       HTTP_ADDR: ":8080"
       CONFIRMATIONS: "3"
       INVOICE_TTL: 60m
+      # Демо-партнёры alpha и beta (ключи demo-key-alpha и demo-key-beta) для ручной проверки.
+      DEMO_SEED: "true"
       # Демо-адрес для проверки ветки «высокий риск»; можно переопределить через окружение.
       AML_BLACKLIST: ${AML_BLACKLIST:-0x000000000000000000000000000000000000dEaD}
       USDT_CONTRACT: "0xdAC17F958D2ee523a2206206994597C13D831ec7"

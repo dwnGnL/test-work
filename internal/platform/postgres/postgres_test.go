@@ -69,13 +69,57 @@ func TestMigrateConcurrentRunners(t *testing.T) {
 	if want := len(embeddedVersions(t)); n != want {
 		t.Errorf("applied %d migrations, want %d", n, want)
 	}
-	var partners int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM partners.partners`).Scan(&partners); err != nil {
+	// Четыре системных счёта ledger вставляет миграция 0006: она выполнилась один раз.
+	var accounts int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM ledger.accounts`).Scan(&accounts); err != nil {
 		t.Fatal(err)
 	}
-	if partners != 2 {
-		t.Errorf("seed ran %d times, want exactly once (2 partners), got %d rows", partners/2, partners)
+	if accounts != 4 {
+		t.Errorf("ledger accounts = %d, want the 4 system accounts", accounts)
 	}
+}
+
+// База, где записана версия удалённой миграции (например, 0008_seed_demo, из которой убрали
+// демо-данные), не должна мешать запуску: неизвестные применённые версии игнорируются.
+func TestMigrateIgnoresUnknownAppliedVersions(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("embedded migrations", func(t *testing.T) {
+		pool := pgtest.NewPool(t)
+		if err := postgres.Migrate(ctx, pool, migrations.FS, discardLog()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO public.schema_migrations (version) VALUES ('0008_seed_demo')`); err != nil {
+			t.Fatal(err)
+		}
+		before := versions(t, pool)
+
+		if err := postgres.Migrate(ctx, pool, migrations.FS, discardLog()); err != nil {
+			t.Fatalf("Migrate with an unknown applied version: %v", err)
+		}
+		if after := versions(t, pool); !slices.Equal(after, before) {
+			t.Errorf("schema_migrations changed: %v, was %v", after, before)
+		}
+	})
+
+	t.Run("new migration is still applied", func(t *testing.T) {
+		pool := pgtest.NewPool(t)
+		fsys := fstest.MapFS{"0001_a.sql": {Data: []byte(`CREATE TABLE a (id int);`)}}
+		if err := postgres.Migrate(ctx, pool, fsys, discardLog()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO public.schema_migrations (version) VALUES ('0002_removed')`); err != nil {
+			t.Fatal(err)
+		}
+
+		fsys["0003_c.sql"] = &fstest.MapFile{Data: []byte(`CREATE TABLE c (id int);`)}
+		if err := postgres.Migrate(ctx, pool, fsys, discardLog()); err != nil {
+			t.Fatal(err)
+		}
+		if got := versions(t, pool); !slices.Equal(got, []string{"0001_a", "0002_removed", "0003_c"}) {
+			t.Errorf("applied = %v, want [0001_a 0002_removed 0003_c]", got)
+		}
+	})
 }
 
 // Весь прогон — одна транзакция: сбой любой миграции откатывает и те, что в нём уже выполнились.

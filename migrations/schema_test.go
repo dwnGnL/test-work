@@ -2,7 +2,6 @@ package migrations_test
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"io/fs"
 	"log/slog"
@@ -23,7 +22,6 @@ import (
 var moduleSchemas = []string{"partners", "invoices", "chainsim", "scanner", "payments", "ledger", "refunds"}
 
 // Правило модульного монолита: SQL модуля обращается только к его собственной схеме.
-// Единственное исключение — демо-сид 0008, он явно помечен в самом файле.
 func TestMigrationsTouchOnlyOwnSchema(t *testing.T) {
 	own := map[string][]string{
 		"0001_partners.sql":                   {"partners"},
@@ -33,7 +31,6 @@ func TestMigrationsTouchOnlyOwnSchema(t *testing.T) {
 		"0005_payments.sql":                   {"payments"},
 		"0006_ledger.sql":                     {"ledger"},
 		"0007_refunds.sql":                    {"refunds"},
-		"0008_seed_demo.sql":                  {"partners", "ledger"}, // демо-данные: partner:{id} подставляется подзапросом
 		"0009_ledger_hardening.sql":           {"ledger"},
 		"0010_payments_aml_verdict.sql":       {"payments"},
 		"0011_invoices_address_lowercase.sql": {"invoices"},
@@ -118,53 +115,6 @@ func TestSchema(t *testing.T) {
 		}
 	})
 
-	t.Run("demo seed", func(t *testing.T) {
-		want := map[string]struct {
-			bps int
-			key string
-		}{"alpha": {150, "demo-key-alpha"}, "beta": {50, "demo-key-beta"}}
-
-		rows, err := pool.Query(ctx, `SELECT id, name, fee_bps, api_key_hash FROM partners.partners`)
-		if err != nil {
-			t.Fatal(err)
-		}
-		type partner struct {
-			id   int64
-			name string
-		}
-		var got []partner
-		for rows.Next() {
-			var (
-				p    partner
-				bps  int
-				hash []byte
-			)
-			if err := rows.Scan(&p.id, &p.name, &bps, &hash); err != nil {
-				t.Fatal(err)
-			}
-			w, ok := want[p.name]
-			if !ok {
-				t.Fatalf("unexpected partner %q", p.name)
-			}
-			sum := sha256.Sum256([]byte(w.key))
-			if bps != w.bps || string(hash) != string(sum[:]) {
-				t.Errorf("partner %s: fee_bps=%d (want %d), hash matches=%t", p.name, bps, w.bps, string(hash) == string(sum[:]))
-			}
-			got = append(got, p)
-		}
-		rows.Close()
-		if len(got) != 2 {
-			t.Fatalf("got %d partners, want 2", len(got))
-		}
-		for _, p := range got {
-			var n int
-			code := "partner:" + itoa(p.id)
-			if err := pool.QueryRow(ctx, `SELECT count(*) FROM ledger.accounts WHERE code = $1`, code).Scan(&n); err != nil || n != 1 {
-				t.Errorf("ledger account %s: count=%d err=%v", code, n, err)
-			}
-		}
-	})
-
 	t.Run("system ledger accounts", func(t *testing.T) {
 		for _, code := range []string{"assets:deposits", "hold:aml", "refunds:payable", "revenue:fees"} {
 			var n int
@@ -241,7 +191,8 @@ func TestSchema(t *testing.T) {
 		}{
 			{"partner fee above 100%", `INSERT INTO partners.partners (name, api_key_hash, fee_bps) VALUES ('x', '\x01', 10001)`, "23514"},
 			{"partner fee negative", `INSERT INTO partners.partners (name, api_key_hash, fee_bps) VALUES ('x', '\x02', -1)`, "23514"},
-			{"partner key unique", `INSERT INTO partners.partners (name, api_key_hash, fee_bps) SELECT 'dup', api_key_hash, 0 FROM partners.partners LIMIT 1`, "23505"},
+			{"partner ok", `INSERT INTO partners.partners (name, api_key_hash, fee_bps) VALUES ('x', '\x03', 0)`, ""},
+			{"partner key unique", `INSERT INTO partners.partners (name, api_key_hash, fee_bps) VALUES ('dup', '\x03', 0)`, "23505"},
 			{"invoice amount zero", invoiceInsert("a", "k1", 0, "0xa1"), "23514"},
 			{"invoice fee above 100%", invoiceInsert("a", "k1", 1, "0xa1", 10001), "23514"},
 			{"invoice ok", invoiceInsert("a", "k1", 1, "0xa1"), ""},
@@ -314,7 +265,8 @@ func invoiceInsert(partner, key string, amount int, addr string, bps ...int) str
 	if len(bps) > 0 {
 		fee = bps[0]
 	}
-	pid := map[string]string{"a": "(SELECT id FROM partners.partners WHERE name = 'alpha')", "b": "(SELECT id FROM partners.partners WHERE name = 'beta')"}[partner]
+	// partner_id — просто число: внешнего ключа на схему partners нет, партнёры в таблице не нужны.
+	pid := map[string]string{"a": "1", "b": "2"}[partner]
 	return `INSERT INTO invoices.invoices (partner_id, idempotency_key, request_hash, amount, fee_bps, deposit_address, expires_at)
 		VALUES (` + pid + `, '` + key + `', '\x00', ` + itoa(int64(amount)) + `, ` + itoa(int64(fee)) + `, '` + addr + `', now() + interval '1 hour')`
 }

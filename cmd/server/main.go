@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dwnGnL/test-work/internal/config"
+	"github.com/dwnGnL/test-work/internal/partners"
 	"github.com/dwnGnL/test-work/internal/platform/postgres"
 	"github.com/dwnGnL/test-work/migrations"
 )
@@ -46,6 +47,14 @@ func run(log *slog.Logger) error {
 
 	if err := postgres.Migrate(ctx, pool, migrations.FS, log); err != nil {
 		return err
+	}
+
+	// Демо-партнёры с публичными ключами: только по явному флагу, не из миграции.
+	if cfg.DemoSeed {
+		if err := partners.SeedDemo(ctx, pool); err != nil {
+			return err
+		}
+		log.Info("demo partners are ready", "names", "alpha, beta")
 	}
 
 	mux := http.NewServeMux()

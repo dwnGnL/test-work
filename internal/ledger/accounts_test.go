@@ -18,7 +18,6 @@ func TestEnsureAccount(t *testing.T) {
 		return count(t, pool, `SELECT count(*) FROM ledger.accounts WHERE code = $1`, code)
 	}
 
-	// Партнёры 1 и 2 — демо-данные миграции 0008, у них счета уже есть; берём свободные номера.
 	t.Run("repeat", func(t *testing.T) {
 		if n := accounts("partner:101"); n != 0 {
 			t.Fatalf("partner:101 exists before the test (%d rows)", n)

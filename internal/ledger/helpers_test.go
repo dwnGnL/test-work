@@ -100,8 +100,8 @@ func journalSize(t testing.TB, q ledger.Querier) (transactions, entries int) {
 }
 
 // assertTotals сверяет сальдо перечисленных счетов и проверяет главный инвариант:
-// сумма по всем счетам — ноль. Остальные счета (например, демо-партнёры из миграции 0008)
-// на ожидаемые значения не проверяются, но в сумму входят.
+// сумма по всем счетам — ноль. Остальные счета на ожидаемые значения не проверяются,
+// но в сумму входят.
 func assertTotals(t *testing.T, q ledger.Querier, want map[string]money.Amount) {
 	t.Helper()
 	got, err := ledger.Totals(context.Background(), q)
