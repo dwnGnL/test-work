@@ -13,21 +13,25 @@ import (
 	"strings"
 )
 
-// Decimals — число знаков после точки у USDT.
-const Decimals = 6
+const (
+	// Decimals — число знаков после точки у USDT.
+	Decimals = 6
+	// scale — сколько минимальных единиц в одном USDT: 10^Decimals.
+	scale = 1_000_000
+	// maxBps — 100% в базисных пунктах.
+	maxBps = 10_000
+)
 
 // Amount — сумма в минимальных единицах (10⁻⁶ USDT).
 type Amount int64
 
-// Ошибки Parse. Возвращаются обёрнутыми, проверять через errors.Is.
+// Ошибки пакета. Возвращаются обёрнутыми, проверять через errors.Is.
 var (
 	ErrSyntax         = errors.New("money: invalid syntax")
 	ErrPrecision      = errors.New("money: too many decimal places")
 	ErrOverflow       = errors.New("money: amount overflows int64")
 	ErrInvalidFeeArgs = errors.New("money: fee arguments out of range")
 )
-
-const scale = 1_000_000 // 10^Decimals
 
 // Parse строго разбирает десятичную запись суммы: цифры, опционально одна точка
 // и цифры после неё (не больше Decimals). Целая и дробная части обязательны:
@@ -118,9 +122,6 @@ func (a *Amount) UnmarshalJSON(data []byte) error {
 	*a = v
 	return nil
 }
-
-// maxBps — 100% в базисных пунктах.
-const maxBps = 10_000
 
 // FeeBps возвращает комиссию в базисных пунктах: floor((amount × bps + 5000) / 10000),
 // то есть округление до ближайшего, половина вверх.

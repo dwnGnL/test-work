@@ -2,7 +2,6 @@ package ledger
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/dwnGnL/test-work/internal/money"
@@ -40,9 +39,6 @@ func PartnerBalance(ctx context.Context, q Querier, partnerID int64) (money.Amou
 func Totals(ctx context.Context, q Querier) (map[string]money.Amount, error) {
 	return selectTotals(ctx, q)
 }
-
-// ErrBooksUnbalanced — сумма всех проводок журнала не равна нулю.
-var ErrBooksUnbalanced = errors.New("ledger: books are not balanced")
 
 // CheckBalanced проверяет главный инвариант двойной записи: сумма всех проводок равна нулю.
 // Триггер базы гарантирует это для каждой транзакции журнала, поэтому ошибка здесь означает,
