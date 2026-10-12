@@ -37,7 +37,7 @@ func (a *API) auth(next http.Handler) http.Handler {
 func (a *API) partnerFrom(w http.ResponseWriter, r *http.Request) (partners.Partner, bool) {
 	p, ok := r.Context().Value(partnerKey{}).(partners.Partner)
 	if !ok {
-		a.internalError(w, r, errors.New("httpapi: handler runs without authentication"))
+		a.internalError(w, r, errNoPartner)
 	}
 	return p, ok
 }

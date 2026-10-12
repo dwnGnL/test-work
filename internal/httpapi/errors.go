@@ -20,8 +20,13 @@ const (
 	codeInternal               = "internal_error"
 )
 
-// errTrailingData — после JSON-объекта в теле есть что-то ещё.
-var errTrailingData = errors.New("unexpected data after the JSON object")
+var (
+	// errTrailingData — после JSON-объекта в теле есть что-то ещё.
+	errTrailingData = errors.New("unexpected data after the JSON object")
+	// errNoPartner — обработчик вызван без auth: в контексте запроса нет партнёра.
+	// Это ошибка сборки маршрутов, наружу она уходит как 500.
+	errNoPartner = errors.New("httpapi: handler runs without authentication")
+)
 
 // errorResponse — единый формат ошибки: {"error":{"code":"...","message":"..."}}.
 type errorResponse struct {

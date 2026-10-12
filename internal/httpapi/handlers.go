@@ -77,9 +77,9 @@ func (a *API) createInvoice(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		a.internalError(w, r, err)
 	case created:
-		a.writeJSON(w, r, http.StatusCreated, a.invoiceResponse(inv))
+		a.writeJSON(w, r, http.StatusCreated, a.toInvoiceResponse(inv))
 	default:
-		a.writeJSON(w, r, http.StatusOK, a.invoiceResponse(inv))
+		a.writeJSON(w, r, http.StatusOK, a.toInvoiceResponse(inv))
 	}
 }
 
@@ -98,7 +98,7 @@ func (a *API) getInvoice(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, a.invoiceResponse(inv))
+	a.writeJSON(w, r, http.StatusOK, a.toInvoiceResponse(inv))
 }
 
 // getBalance обрабатывает GET /v1/balance: баланс только того партнёра, что вошёл.
@@ -115,8 +115,8 @@ func (a *API) getBalance(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, r, http.StatusOK, balanceResponse{Balance: balance})
 }
 
-// invoiceResponse собирает ответ по счёту.
-func (a *API) invoiceResponse(inv invoices.Invoice) invoiceResponse {
+// toInvoiceResponse собирает ответ по счёту.
+func (a *API) toInvoiceResponse(inv invoices.Invoice) invoiceResponse {
 	// Платежей пока нет: получено ноль, в обработке ничего нет. Когда появится модуль платежей,
 	// сюда придут его данные (сумма зачисленных платежей до комиссии и признак «есть платёж
 	// в обработке»), и статус начнёт меняться.

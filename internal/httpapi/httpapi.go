@@ -31,22 +31,23 @@ func (a *API) routes() http.Handler {
 	mux.Handle("GET /v1/balance", a.auth(http.HandlerFunc(a.getBalance)))
 
 	// Остальное тоже отвечает JSON-ошибкой в общем формате (по умолчанию mux пишет текст):
-	// неизвестный путь — 404, известный путь с другим методом — 405.
+	// известный путь с другим методом — 405, неизвестный путь — 404.
+	mux.HandleFunc("/healthz", methodNotAllowed("GET, HEAD"))
+	mux.HandleFunc("/v1/invoices", methodNotAllowed("POST"))
+	mux.HandleFunc("/v1/invoices/{id}", methodNotAllowed("GET, HEAD"))
+	mux.HandleFunc("/v1/balance", methodNotAllowed("GET, HEAD"))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, codeNotFound, "not found")
 	})
-	for path, allow := range map[string]string{
-		"/healthz":          "GET, HEAD",
-		"/v1/invoices":      "POST",
-		"/v1/invoices/{id}": "GET, HEAD",
-		"/v1/balance":       "GET, HEAD",
-	} {
-		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Allow", allow)
-			writeError(w, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed")
-		})
-	}
 	return mux
+}
+
+// methodNotAllowed отвечает 405 и перечисляет разрешённые методы в заголовке Allow.
+func methodNotAllowed(allow string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Allow", allow)
+		writeError(w, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed")
+	}
 }
 
 // internalError пишет в лог настоящую причину, а клиенту отвечает общим 500: текст ошибки
