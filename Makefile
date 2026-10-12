@@ -3,9 +3,12 @@
 build:
 	go build -o bin/server ./cmd/server
 
-# Интеграционные тесты ходят в Postgres из docker compose (порт 55432 на localhost).
+# Интеграционные тесты ходят в Postgres из docker compose (по умолчанию порт 55432 на localhost).
 # Каждый тест создаёт себе временную базу, основную не трогает.
-TEST_DATABASE_URL ?= postgres://payments:payments@127.0.0.1:55432/payments?sslmode=disable
+# Порт задаёт DB_PORT, тот же, что читает docker-compose.yml: export передаёт его и docker compose.
+# Тесты на втором стеке: make test DB_PORT=55433 COMPOSE_PROJECT_NAME=clean.
+export DB_PORT ?= 55432
+TEST_DATABASE_URL ?= postgres://payments:payments@127.0.0.1:$(DB_PORT)/payments?sslmode=disable
 
 test:
 	docker compose up -d --wait db
