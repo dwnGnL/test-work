@@ -14,10 +14,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dwnGnL/test-work/internal/aml"
 	"github.com/dwnGnL/test-work/internal/chain"
 	"github.com/dwnGnL/test-work/internal/config"
 	"github.com/dwnGnL/test-work/internal/httpapi"
 	"github.com/dwnGnL/test-work/internal/partners"
+	"github.com/dwnGnL/test-work/internal/payments"
 	"github.com/dwnGnL/test-work/internal/platform/postgres"
 	"github.com/dwnGnL/test-work/internal/scanner"
 	"github.com/dwnGnL/test-work/migrations"
@@ -26,9 +28,9 @@ import (
 // shutdownTimeout — сколько ждём завершения текущих запросов при остановке.
 const shutdownTimeout = 10 * time.Second
 
-// blockScanner — то, что фоновому циклу нужно от сканера: один проход. Под него подходит
-// *scanner.Scanner, а тест подставляет заглушку.
-type blockScanner interface {
+// ticker — то, что фоновому циклу нужно от обработчика: один проход. Под него подходят
+// *scanner.Scanner и *payments.Processor, а тест подставляет заглушку.
+type ticker interface {
 	Tick(ctx context.Context) error
 }
 
@@ -70,25 +72,37 @@ func run(log *slog.Logger) error {
 	}
 
 	// Сеть — симулятор, её состояние лежит в базе. Сканер читает её через интерфейс chain.Chain.
+	// AML — мок с чёрным списком из конфигурации, обработчик платежей спрашивает его через aml.Checker.
 	simulator := chain.NewSimulator(pool)
+	amlMock := aml.NewMock(cfg.AMLBlacklist)
 	opts := httpapi.Options{InvoiceTTL: cfg.InvoiceTTL, USDTContract: cfg.USDTContract}
 	if cfg.SimAPI {
 		opts.Simulator = simulator
+		opts.AML = amlMock
 		log.Warn("simulator control endpoints /sim/* are enabled without authentication (SIM_API); do not use outside local runs")
 	}
 
-	// Сканер блоков работает в фоне до остановки сервиса; перед выходом его дожидаются,
-	// иначе проход мог бы оборваться на закрытом пуле.
-	scanCtx, stopScan := context.WithCancel(ctx)
-	var scanWG sync.WaitGroup
-	scanWG.Add(1)
-	go func() {
-		defer scanWG.Done()
-		scanLoop(scanCtx, scanner.New(pool, simulator, cfg.Confirmations, cfg.USDTContract, log), cfg.ScanInterval, log)
-	}()
+	// Сканер блоков и обработчик платежей работают в фоне до остановки сервиса, каждый в своём
+	// цикле с одним интервалом. Перед выходом обоих дожидаются, иначе проход мог бы оборваться
+	// на закрытом пуле.
+	loopCtx, stopLoops := context.WithCancel(ctx)
+	var loopsWG sync.WaitGroup
+	for _, w := range []struct {
+		name   string
+		worker ticker
+	}{
+		{"scanner", scanner.New(pool, simulator, cfg.Confirmations, cfg.USDTContract, log)},
+		{"payment processor", payments.NewProcessor(pool, amlMock, log)},
+	} {
+		loopsWG.Add(1)
+		go func() {
+			defer loopsWG.Done()
+			tickLoop(loopCtx, w.name, w.worker, cfg.ScanInterval, log)
+		}()
+	}
 	defer func() {
-		stopScan()
-		scanWG.Wait()
+		stopLoops()
+		loopsWG.Wait()
 	}()
 
 	srv := &http.Server{
@@ -134,31 +148,31 @@ func run(log *slog.Logger) error {
 	return nil
 }
 
-// scanLoop вызывает проход сканера по таймеру, пока ctx не отменён.
-func scanLoop(ctx context.Context, s blockScanner, interval time.Duration, log *slog.Logger) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+// tickLoop вызывает проход обработчика по таймеру, пока ctx не отменён. name попадает в лог.
+func tickLoop(ctx context.Context, name string, t ticker, interval time.Duration, log *slog.Logger) {
+	timer := time.NewTicker(interval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			scanOnce(ctx, s, log)
+		case <-timer.C:
+			tickOnce(ctx, name, t, log)
 		}
 	}
 }
 
-// scanOnce делает один проход. Ошибка и паника пишутся в лог, цикл продолжается со следующего
-// прохода: курсор в базе, потерять нечего. В нашем коде паник нет, но она возможна в библиотеке,
-// и без recover упал бы весь сервис, включая HTTP. Отмена контекста при остановке сервиса
-// ошибкой не считается.
-func scanOnce(ctx context.Context, s blockScanner, log *slog.Logger) {
+// tickOnce делает один проход. Ошибка и паника пишутся в лог, цикл продолжается со следующего
+// прохода: состояние (курсор, очередь платежей) в базе, потерять нечего. В нашем коде паник нет,
+// но она возможна в библиотеке, и без recover упал бы весь сервис, включая HTTP. Отмена контекста
+// при остановке сервиса ошибкой не считается.
+func tickOnce(ctx context.Context, name string, t ticker, log *slog.Logger) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error("scanner tick panicked", "panic", r, "stack", string(debug.Stack()))
+			log.Error(name+" tick panicked", "panic", r, "stack", string(debug.Stack()))
 		}
 	}()
-	if err := s.Tick(ctx); err != nil && ctx.Err() == nil {
-		log.Error("scanner tick failed", "err", err)
+	if err := t.Tick(ctx); err != nil && ctx.Err() == nil {
+		log.Error(name+" tick failed", "err", err)
 	}
 }

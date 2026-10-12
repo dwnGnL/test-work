@@ -12,6 +12,7 @@ import (
 	"github.com/dwnGnL/test-work/internal/ledger"
 	"github.com/dwnGnL/test-work/internal/money"
 	"github.com/dwnGnL/test-work/internal/payments"
+	"github.com/dwnGnL/test-work/internal/refunds"
 )
 
 const (
@@ -42,12 +43,21 @@ type invoiceResponse struct {
 }
 
 // paymentResponse — платёж в ответе по счёту. BlockNumber равен null, пока у платежа нет блока
-// (платёж orphaned: блок выброшен реоргом).
+// (платёж orphaned: блок выброшен реоргом). Refund равен null, пока платёж не отклонён AML
+// (статус rejected): тогда по нему создан возврат.
 type paymentResponse struct {
-	TxHash      string       `json:"tx_hash"`
-	Amount      money.Amount `json:"amount"`
-	Status      string       `json:"status"`
-	BlockNumber *int64       `json:"block_number"`
+	TxHash      string          `json:"tx_hash"`
+	Amount      money.Amount    `json:"amount"`
+	Status      string          `json:"status"`
+	BlockNumber *int64          `json:"block_number"`
+	Refund      *refundResponse `json:"refund"`
+}
+
+// refundResponse — возврат отклонённого платежа: куда, сколько и на каком он шаге.
+type refundResponse struct {
+	Status    string       `json:"status"`
+	ToAddress string       `json:"to_address"`
+	Amount    money.Amount `json:"amount"`
 }
 
 // balanceResponse — тело GET /v1/balance.
@@ -140,9 +150,10 @@ func (a *API) writeInvoice(w http.ResponseWriter, r *http.Request, status int, i
 }
 
 // toInvoiceResponse собирает ответ по счёту: сумма полученного (платежи credited, до комиссии)
-// и статус считаются по payments.Summary, список платежей берётся из payments.ListByInvoice.
-// Это два отдельных чтения, поэтому во время смены статуса платежа они могут разойтись на один
-// запрос; следующий запрос покажет согласованное состояние.
+// и статус считаются по payments.Summary, список платежей берётся из payments.ListByInvoice,
+// возвраты отклонённых платежей — из refunds.ByPayments. Это отдельные чтения, поэтому во время
+// смены статуса платежа они могут разойтись на один запрос; следующий запрос покажет
+// согласованное состояние.
 func (a *API) toInvoiceResponse(ctx context.Context, inv invoices.Invoice) (invoiceResponse, error) {
 	received, inProgress, err := payments.Summary(ctx, a.db, inv.ID)
 	if err != nil {
@@ -153,9 +164,23 @@ func (a *API) toInvoiceResponse(ctx context.Context, inv invoices.Invoice) (invo
 		return invoiceResponse{}, err
 	}
 
+	var rejected []int64 // возврат есть только у отклонённых платежей
+	for _, p := range list {
+		if p.Status == payments.StatusRejected {
+			rejected = append(rejected, p.ID)
+		}
+	}
+	refundOf, err := refunds.ByPayments(ctx, a.db, rejected)
+	if err != nil {
+		return invoiceResponse{}, err
+	}
+
 	items := make([]paymentResponse, len(list)) // пустой массив, а не null, когда платежей нет
 	for i, p := range list {
-		items[i] = paymentResponse{TxHash: p.TxHash, Amount: p.Amount, Status: string(p.Status), BlockNumber: p.BlockNumber}
+		items[i] = paymentResponse{
+			TxHash: p.TxHash, Amount: p.Amount, Status: string(p.Status), BlockNumber: p.BlockNumber,
+			Refund: toRefundResponse(refundOf, p.ID),
+		}
 	}
 	return invoiceResponse{
 		ID:             inv.ID,
@@ -167,6 +192,15 @@ func (a *API) toInvoiceResponse(ctx context.Context, inv invoices.Invoice) (invo
 		CreatedAt:      inv.CreatedAt.UTC(),
 		Payments:       items,
 	}, nil
+}
+
+// toRefundResponse возвращает возврат платежа paymentID или nil, если возврата нет.
+func toRefundResponse(refundOf map[int64]refunds.Refund, paymentID int64) *refundResponse {
+	r, ok := refundOf[paymentID]
+	if !ok {
+		return nil
+	}
+	return &refundResponse{Status: string(r.Status), ToAddress: r.ToAddress, Amount: r.Amount}
 }
 
 // decodeBody строго разбирает тело запроса в T: размер ограничен, неизвестные поля и данные

@@ -13,6 +13,7 @@ const (
 	transferBodyShape = `request body must be a JSON object with string fields "to", "from", "amount" and an optional string "token"`
 	blocksBodyShape   = `request body must be a JSON object with an integer field "count"`
 	reorgBodyShape    = `request body must be a JSON object with an integer field "depth" and an optional boolean "drop_transfers"`
+	amlBodyShape      = `request body must be a JSON object with a boolean field "available"`
 )
 
 // simTransferRequest — тело POST /sim/transfers. Amount указателем, чтобы пропущенную сумму
@@ -33,6 +34,17 @@ type simBlocksRequest struct {
 type simReorgRequest struct {
 	Depth         int  `json:"depth"`
 	DropTransfers bool `json:"drop_transfers"`
+}
+
+// simAMLRequest — тело POST /sim/aml. Available указателем, чтобы пропущенное поле не приняли
+// за false: выключить AML нужно попросить явно.
+type simAMLRequest struct {
+	Available *bool `json:"available"`
+}
+
+// amlResponse — ответ POST /sim/aml: в каком состоянии теперь мок.
+type amlResponse struct {
+	Available bool `json:"available"`
 }
 
 // txHashResponse — ответ POST /sim/transfers.
@@ -122,6 +134,23 @@ func (a *API) simReorg(w http.ResponseWriter, r *http.Request) {
 	default:
 		a.writeJSON(w, r, http.StatusOK, toHeadResponse(head))
 	}
+}
+
+// simAML обрабатывает POST /sim/aml: включает или выключает AML-мок, 200 с новым состоянием.
+// Пока мок выключен, платежи ждут проверки в aml_pending, деньги остаются в холде.
+func (a *API) simAML(w http.ResponseWriter, r *http.Request) {
+	req, err := decodeBody[simAMLRequest](w, r)
+	if err != nil {
+		writeDecodeError(w, err, amlBodyShape)
+		return
+	}
+	if req.Available == nil {
+		writeError(w, http.StatusBadRequest, codeInvalidBody, amlBodyShape)
+		return
+	}
+
+	a.aml.SetAvailable(*req.Available)
+	a.writeJSON(w, r, http.StatusOK, amlResponse{Available: *req.Available})
 }
 
 func toHeadResponse(b chain.Block) headResponse {

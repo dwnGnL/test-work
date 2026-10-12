@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/dwnGnL/test-work/internal/aml"
 	"github.com/dwnGnL/test-work/internal/chain"
 )
 
@@ -18,6 +19,7 @@ type API struct {
 	invoiceTTL time.Duration    // срок жизни нового счёта (из конфигурации)
 	now        func() time.Time // часы; подменяются в тестах
 	sim        *chain.Simulator // nil: ручки /sim/* выключены
+	aml        *aml.Mock        // nil: ручка /sim/aml выключена
 	usdt       string           // контракт USDT: токен перевода по умолчанию для /sim/transfers
 }
 
@@ -27,6 +29,9 @@ type Options struct {
 	// Simulator включает ручки управления сетью /sim/*; nil — их нет, запросы к ним получают 404.
 	// Ручки открыты без входа, поэтому включать их нужно только для проверки сценария (SIM_API).
 	Simulator *chain.Simulator
+	// AML включает ручку переключения AML-мока /sim/aml; nil — её нет. Как и /sim/*, она открыта
+	// без входа и нужна только для проверки сценария «AML недоступен» (SIM_API).
+	AML *aml.Mock
 	// USDTContract — токен, который /sim/transfers подставляет, когда токен в запросе не указан.
 	USDTContract string
 }
@@ -35,7 +40,7 @@ type Options struct {
 func New(db *pgxpool.Pool, log *slog.Logger, opts Options) http.Handler {
 	a := &API{
 		db: db, log: log, invoiceTTL: opts.InvoiceTTL, now: time.Now,
-		sim: opts.Simulator, usdt: opts.USDTContract,
+		sim: opts.Simulator, aml: opts.AML, usdt: opts.USDTContract,
 	}
 	return a.routes()
 }
@@ -56,6 +61,10 @@ func (a *API) routes() http.Handler {
 		mux.HandleFunc("/sim/transfers", methodNotAllowed("POST"))
 		mux.HandleFunc("/sim/blocks", methodNotAllowed("POST"))
 		mux.HandleFunc("/sim/reorg", methodNotAllowed("POST"))
+	}
+	if a.aml != nil {
+		mux.HandleFunc("POST /sim/aml", a.simAML)
+		mux.HandleFunc("/sim/aml", methodNotAllowed("POST"))
 	}
 
 	// Остальное тоже отвечает JSON-ошибкой в общем формате (по умолчанию mux пишет текст):

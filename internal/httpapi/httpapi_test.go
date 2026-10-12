@@ -15,10 +15,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/dwnGnL/test-work/internal/aml"
 	"github.com/dwnGnL/test-work/internal/chain"
 	"github.com/dwnGnL/test-work/internal/ledger"
 	"github.com/dwnGnL/test-work/internal/money"
 	"github.com/dwnGnL/test-work/internal/partners"
+	"github.com/dwnGnL/test-work/internal/payments"
 	"github.com/dwnGnL/test-work/internal/platform/postgres"
 	"github.com/dwnGnL/test-work/internal/platform/postgres/pgtest"
 	"github.com/dwnGnL/test-work/internal/scanner"
@@ -34,6 +36,8 @@ const (
 	notFound  = `{"error":{"code":"not_found","message":"invoice not found"}}`
 	jsonType  = "application/json"
 	validBody = `{"amount":"100.000000"}`
+	// dirtySender — адрес из чёрного списка AML-мока в тестах; sender (payments_test.go) — чистый.
+	dirtySender = "0x000000000000000000000000000000000000dead"
 )
 
 var (
@@ -42,7 +46,7 @@ var (
 )
 
 // fixture — база с двумя партнёрами (alpha: 1,5%, beta: 0,5%), симулятором сети со сканером
-// (порог — три подтверждения) и обработчик поверх неё.
+// (порог — три подтверждения), AML-моком с обработчиком платежей и HTTP-обработчик поверх неё.
 type fixture struct {
 	t     *testing.T
 	pool  *pgxpool.Pool
@@ -50,6 +54,8 @@ type fixture struct {
 	h     http.Handler
 	logs  *bytes.Buffer
 	sc    *scanner.Scanner
+	mock  *aml.Mock
+	proc  *payments.Processor
 	alpha partners.Partner
 	beta  partners.Partner
 }
@@ -59,12 +65,14 @@ func newFixture(t *testing.T) *fixture {
 	pool := pgtest.NewMigrated(t)
 	logs := &bytes.Buffer{}
 	sim := chain.NewSimulator(pool)
+	mock := aml.NewMock([]string{dirtySender})
 	api := &API{
 		db: pool, log: slog.New(slog.NewTextHandler(logs, nil)), invoiceTTL: testTTL, now: time.Now,
-		sim: sim, usdt: testUSDT,
+		sim: sim, aml: mock, usdt: testUSDT,
 	}
 	sc := scanner.New(pool, sim, 3, testUSDT, slog.New(slog.DiscardHandler))
-	f := &fixture{t: t, pool: pool, api: api, h: api.routes(), logs: logs, sc: sc}
+	proc := payments.NewProcessor(pool, mock, slog.New(slog.DiscardHandler))
+	f := &fixture{t: t, pool: pool, api: api, h: api.routes(), logs: logs, sc: sc, mock: mock, proc: proc}
 	f.alpha = f.addPartner("alpha", keyAlpha, 150)
 	f.beta = f.addPartner("beta", keyBeta, 50)
 	return f

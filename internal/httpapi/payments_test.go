@@ -19,10 +19,17 @@ const sender = "0x1111111111111111111111111111111111111111"
 var txHashRe = regexp.MustCompile(`^0x[0-9a-f]{64}$`)
 
 type paymentRow struct {
-	TxHash      string `json:"tx_hash"`
-	Amount      string `json:"amount"`
-	Status      string `json:"status"`
-	BlockNumber *int64 `json:"block_number"`
+	TxHash      string     `json:"tx_hash"`
+	Amount      string     `json:"amount"`
+	Status      string     `json:"status"`
+	BlockNumber *int64     `json:"block_number"`
+	Refund      *refundRow `json:"refund"`
+}
+
+type refundRow struct {
+	Status    string `json:"status"`
+	ToAddress string `json:"to_address"`
+	Amount    string `json:"amount"`
 }
 
 // invoiceWithPayments — ответ по счёту вместе с платежами (invoiceRow без массива остаётся
@@ -55,10 +62,16 @@ func (f *fixture) invoice(apiKey, id string) invoiceWithPayments {
 	return decode[invoiceWithPayments](f.t, rec)
 }
 
-// transfer отправляет перевод на адрес to ручкой симулятора и возвращает хэш транзакции.
+// transfer отправляет перевод от чистого адреса на адрес to ручкой симулятора и возвращает хэш транзакции.
 func (f *fixture) transfer(to, amount string) string {
 	f.t.Helper()
-	rec := f.do(http.MethodPost, "/sim/transfers", "", fmt.Sprintf(`{"to":%q,"from":%q,"amount":%q}`, to, sender, amount))
+	return f.transferFrom(sender, to, amount)
+}
+
+// transferFrom отправляет перевод от адреса from на адрес to ручкой симулятора.
+func (f *fixture) transferFrom(from, to, amount string) string {
+	f.t.Helper()
+	rec := f.do(http.MethodPost, "/sim/transfers", "", fmt.Sprintf(`{"to":%q,"from":%q,"amount":%q}`, to, from, amount))
 	wantStatus(f.t, rec, http.StatusCreated)
 	hash := decode[struct {
 		TxHash string `json:"tx_hash"`
@@ -77,8 +90,8 @@ func (f *fixture) mine(count int) int64 {
 	return decode[headRow](f.t, rec).Head.Number
 }
 
-// creditAll зачисляет платежи счёта напрямую в базе. Решение AML появится на следующем этапе;
-// здесь важно только то, что ответ по счёту считает полученное по платежам credited.
+// creditAll зачисляет платежи счёта напрямую в базе, минуя обработчик: тест проверяет только то,
+// что ответ по счёту считает полученное по платежам credited.
 func (f *fixture) creditAll(invoiceID string) {
 	f.t.Helper()
 	_, err := f.pool.Exec(context.Background(), `
@@ -253,6 +266,7 @@ func TestSimDisabled(t *testing.T) {
 		{http.MethodPost, "/sim/transfers", `{"to":"0x1","from":"0x2","amount":"1"}`},
 		{http.MethodPost, "/sim/blocks", `{"count":1}`},
 		{http.MethodPost, "/sim/reorg", `{"depth":1}`},
+		{http.MethodPost, "/sim/aml", `{"available":false}`},
 		{http.MethodGet, "/sim/blocks", ""},
 	} {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
@@ -270,7 +284,7 @@ func TestSimDisabled(t *testing.T) {
 
 func TestSimMethodNotAllowed(t *testing.T) {
 	f := newFixture(t)
-	for _, path := range []string{"/sim/transfers", "/sim/blocks", "/sim/reorg"} {
+	for _, path := range []string{"/sim/transfers", "/sim/blocks", "/sim/reorg", "/sim/aml"} {
 		rec := f.do(http.MethodGet, path, "", "")
 		wantError(t, rec, http.StatusMethodNotAllowed, "method_not_allowed")
 		if got := rec.Header().Get("Allow"); got != "POST" {
