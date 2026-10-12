@@ -8,7 +8,7 @@ var (
 	ErrInvalidIdempotencyKey = errors.New("invoices: idempotency key must be 1 to 255 characters of valid UTF-8")
 	ErrNonPositiveAmount     = errors.New("invoices: amount must be positive")
 	ErrInvalidFeeBps         = errors.New("invoices: fee must be between 0 and 10000 basis points")
-	ErrNonPositiveTTL        = errors.New("invoices: ttl must be positive")
+	ErrNonPositiveTTL        = errors.New("invoices: ttl must be at least one microsecond")
 	// ErrIdempotencyConflict — ключ идемпотентности этого партнёра уже использован
 	// с другими параметрами запроса.
 	ErrIdempotencyConflict = errors.New("invoices: idempotency key is already used with a different request")

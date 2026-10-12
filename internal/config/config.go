@@ -17,6 +17,9 @@ const (
 	defaultHTTPAddr      = ":8080"
 	defaultConfirmations = 3
 	defaultInvoiceTTL    = 60 * time.Minute
+	// minInvoiceTTL — нижняя граница срока счёта. Срок короче секунды не имеет смысла, а срок
+	// меньше микросекунды округлился бы в базе до нуля: счёт рождался бы уже просроченным.
+	minInvoiceTTL = time.Second
 	// Адрес контракта USDT (ERC-20) в основной сети Ethereum.
 	defaultUSDTContract = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
 )
@@ -84,8 +87,8 @@ func load(getenv func(string) string) (Config, error) {
 		switch {
 		case err != nil:
 			errs = append(errs, fmt.Errorf("INVOICE_TTL: %w", err))
-		case d <= 0:
-			errs = append(errs, fmt.Errorf("INVOICE_TTL: must be positive, got %s", d))
+		case d < minInvoiceTTL:
+			errs = append(errs, fmt.Errorf("INVOICE_TTL: must be at least %s, got %s", minInvoiceTTL, d))
 		default:
 			cfg.InvoiceTTL = d
 		}

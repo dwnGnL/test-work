@@ -392,6 +392,7 @@ func TestCreateValidatesBeforeDatabase(t *testing.T) {
 		{"fee above 100%", with(func(p *invoices.CreateParams) { p.FeeBps = 10_001 }), invoices.ErrInvalidFeeBps},
 		{"ttl zero", with(func(p *invoices.CreateParams) { p.TTL = 0 }), invoices.ErrNonPositiveTTL},
 		{"ttl negative", with(func(p *invoices.CreateParams) { p.TTL = -time.Second }), invoices.ErrNonPositiveTTL},
+		{"ttl below a microsecond", with(func(p *invoices.CreateParams) { p.TTL = 999 * time.Nanosecond }), invoices.ErrNonPositiveTTL},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

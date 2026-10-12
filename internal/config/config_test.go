@@ -83,6 +83,8 @@ func TestLoadErrors(t *testing.T) {
 		{"ttl without unit", map[string]string{"INVOICE_TTL": "60"}, "INVOICE_TTL"},
 		{"ttl zero", map[string]string{"INVOICE_TTL": "0s"}, "INVOICE_TTL"},
 		{"ttl negative", map[string]string{"INVOICE_TTL": "-5m"}, "INVOICE_TTL"},
+		{"ttl below a second", map[string]string{"INVOICE_TTL": "999ms"}, "INVOICE_TTL"},
+		{"ttl of one nanosecond", map[string]string{"INVOICE_TTL": "1ns"}, "INVOICE_TTL"},
 		{"contract too short", map[string]string{"USDT_CONTRACT": "0x1234"}, "USDT_CONTRACT"},
 		{"contract no prefix", map[string]string{"USDT_CONTRACT": "dAC17F958D2ee523a2206206994597C13D831ec7"}, "USDT_CONTRACT"},
 		{"demo seed not a boolean", map[string]string{"DEMO_SEED": "maybe"}, "DEMO_SEED"},

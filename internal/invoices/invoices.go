@@ -116,7 +116,8 @@ func (p CreateParams) validate() error {
 		return fmt.Errorf("%w: got %s", ErrNonPositiveAmount, p.Amount)
 	case p.FeeBps < 0 || p.FeeBps > maxFeeBps:
 		return fmt.Errorf("%w: got %d", ErrInvalidFeeBps, p.FeeBps)
-	case p.TTL <= 0:
+	case p.TTL < time.Microsecond:
+		// База хранит время с точностью до микросекунды: меньший срок округлился бы до нуля.
 		return fmt.Errorf("%w: got %s", ErrNonPositiveTTL, p.TTL)
 	}
 	return nil
