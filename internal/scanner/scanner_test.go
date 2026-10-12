@@ -514,6 +514,39 @@ func TestRewriteAfterLastBlockDoesNotConfirm(t *testing.T) {
 	f.assertCursor(3)
 }
 
+// Длинная цепочка читается порциями: за проход не больше maxBlocksPerTick блоков, затем
+// подтверждение по курсору. Платёж из первого блока проходит порог, не дожидаясь конца цепочки,
+// а платёж из блока за пределом порции обнаруживает следующий проход.
+func TestLongChainIsReadInPortions(t *testing.T) {
+	f := newFixture(t)
+	inv := f.newInvoice()
+	const limit = scanner.MaxBlocksPerTick
+
+	f.send(usdtTo(t, inv.DepositAddress, "25"))
+	f.mine(limit) // блоки 1-200, перевод в блоке 1
+	f.send(usdtTo(t, inv.DepositAddress, "10"))
+	f.mine(50) // блоки 201-250, второй перевод в блоке 201
+
+	f.tick()
+	f.assertCursor(limit)
+	first := f.onlyPayment(inv)
+	if first.Status != payments.StatusAMLPending {
+		t.Errorf("payment from block 1 = %+v, want aml_pending: the pass confirms by the cursor", first)
+	}
+	f.assertHold(amt(t, "25"))
+
+	f.tick()
+	f.assertCursor(limit + 50)
+	list := f.payments(inv)
+	if len(list) != 2 || list[0].ID != first.ID || list[1].Status != payments.StatusAMLPending {
+		t.Errorf("payments = %+v, want the first one and the second from block 201 in aml_pending", list)
+	}
+	f.assertHold(amt(t, "35"))
+
+	f.tick() // дочитывать нечего
+	f.assertCursor(limit + 50)
+}
+
 // Если сеть переписывает цепочку при каждом чтении, проход заканчивается ошибкой, а не зацикливается.
 func TestUnstableChainStopsThePass(t *testing.T) {
 	f := newFixture(t)
