@@ -74,6 +74,23 @@ func selectByID(ctx context.Context, q Querier, partnerID int64, id string) (inv
 	return inv, true, nil
 }
 
+// selectByDepositAddress читает счёт по депозитному адресу. Фильтра по партнёру нет: адрес
+// уникален в таблице, а искать по нему будет сканер блоков, которому партнёр не известен.
+// found = false, если такого счёта нет.
+func selectByDepositAddress(ctx context.Context, q Querier, address string) (inv Invoice, found bool, err error) {
+	inv, err = scanInvoice(q.QueryRow(ctx, `
+		SELECT `+invoiceColumns+`
+		FROM invoices.invoices
+		WHERE deposit_address = $1`, address))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Invoice{}, false, nil
+	}
+	if err != nil {
+		return Invoice{}, false, fmt.Errorf("invoices: look up by deposit address: %w", err)
+	}
+	return inv, true, nil
+}
+
 // scanInvoice читает строку с колонками invoiceColumns.
 func scanInvoice(row pgx.Row) (Invoice, error) {
 	var inv Invoice

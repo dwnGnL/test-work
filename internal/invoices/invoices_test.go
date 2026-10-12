@@ -432,3 +432,65 @@ func TestCreateAcceptsBoundaryValues(t *testing.T) {
 		})
 	}
 }
+
+// Поиск по депозитному адресу идёт без партнёра и без учёта регистра адреса.
+func TestFindByDepositAddress(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewMigrated(t)
+
+	a, _, errA := invoices.Create(ctx, pool, params(1, "order-1"))
+	b, _, errB := invoices.Create(ctx, pool, params(2, "order-1"))
+	if errA != nil || errB != nil {
+		t.Fatal(errA, errB)
+	}
+
+	// Каждый счёт находится по своему адресу, партнёр при этом не указывается.
+	for _, want := range []invoices.Invoice{a, b} {
+		got, found, err := invoices.FindByDepositAddress(ctx, pool, want.DepositAddress)
+		if err != nil || !found || !same(got, want) {
+			t.Errorf("FindByDepositAddress(%s) = %+v, %v, %v; want %+v", want.DepositAddress, got, found, err, want)
+		}
+	}
+
+	// Регистр адреса не важен: в событиях сети и в запросах он бывает любым.
+	upper := "0x" + strings.ToUpper(a.DepositAddress[2:])
+	if got, found, err := invoices.FindByDepositAddress(ctx, pool, upper); err != nil || !found || !same(got, a) {
+		t.Errorf("FindByDepositAddress(%s) = %+v, %v, %v; want %+v", upper, got, found, err, a)
+	}
+
+	// Нет такого адреса — не ошибка.
+	for _, address := range []string{"", "0x" + strings.Repeat("0", 40), a.DepositAddress + "0", a.DepositAddress[:20]} {
+		if got, found, err := invoices.FindByDepositAddress(ctx, pool, address); err != nil || found || got != (invoices.Invoice{}) {
+			t.Errorf("FindByDepositAddress(%q) = %+v, %v, %v; want not found", address, got, found, err)
+		}
+	}
+
+	// Get по-прежнему держит изоляцию партнёров: чужой счёт для него не существует.
+	if _, err := invoices.Get(ctx, pool, 2, a.ID); !errors.Is(err, invoices.ErrNotFound) {
+		t.Errorf("Get of a foreign invoice error = %v, want ErrNotFound", err)
+	}
+	if got, err := invoices.Get(ctx, pool, 1, a.ID); err != nil || !same(got, a) {
+		t.Errorf("Get of an own invoice = %+v, %v", got, err)
+	}
+}
+
+// Поиск работает и внутри транзакции вызывающего: сканер ищет счёт в той же транзакции, что пишет платёж.
+func TestFindByDepositAddressInTransaction(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewMigrated(t)
+
+	inv, _, err := invoices.Create(ctx, pool, params(7, "order-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = postgres.InTx(ctx, pool, func(tx pgx.Tx) error {
+		got, found, err := invoices.FindByDepositAddress(ctx, tx, inv.DepositAddress)
+		if err != nil || !found || !same(got, inv) {
+			t.Errorf("FindByDepositAddress in a transaction = %+v, %v, %v", got, found, err)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

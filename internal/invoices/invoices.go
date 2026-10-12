@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -101,6 +102,17 @@ func Get(ctx context.Context, q Querier, partnerID int64, id string) (Invoice, e
 		return Invoice{}, ErrNotFound
 	}
 	return inv, nil
+}
+
+// FindByDepositAddress находит счёт по депозитному адресу; found = false, если такого счёта нет.
+// Адрес приводится к нижнему регистру: в базе он хранится только так, а в событиях сети
+// и в запросах регистр бывает любым.
+//
+// Партнёром не фильтрует: это поиск для сканера блоков, который по адресу получателя узнаёт
+// счёт и его партнёра. В API партнёра эту функцию вызывать нельзя, там действует Get: он
+// держит изоляцию партнёров и не отличает чужой счёт от несуществующего.
+func FindByDepositAddress(ctx context.Context, q Querier, address string) (inv Invoice, found bool, err error) {
+	return selectByDepositAddress(ctx, q, strings.ToLower(address))
 }
 
 // validate проверяет параметры, не обращаясь к базе.
