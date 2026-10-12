@@ -38,7 +38,7 @@ services:
       CONFIRMATIONS: "3"
       INVOICE_TTL: 60m
       # Демо-партнёры alpha и beta (ключи demo-key-alpha и demo-key-beta) для ручной проверки.
-      DEMO_SEED: "true"
+      DEMO_SEED: ${DEMO_SEED:-true}
       # Демо-адрес для проверки ветки «высокий риск»; можно переопределить через окружение.
       AML_BLACKLIST: ${AML_BLACKLIST:-0x000000000000000000000000000000000000dEaD}
       USDT_CONTRACT: "0xdAC17F958D2ee523a2206206994597C13D831ec7"

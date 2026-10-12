@@ -55,7 +55,8 @@ func run(log *slog.Logger) error {
 		if err := partners.SeedDemo(ctx, pool); err != nil {
 			return err
 		}
-		log.Info("demo partners are ready", "names", "alpha, beta")
+		log.Warn("demo partners with publicly known API keys are enabled (DEMO_SEED); do not use outside local runs",
+			"names", "alpha, beta")
 	}
 
 	srv := &http.Server{
