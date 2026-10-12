@@ -117,15 +117,15 @@ func (a *API) getBalance(w http.ResponseWriter, r *http.Request) {
 
 // invoiceResponse собирает ответ по счёту.
 func (a *API) invoiceResponse(inv invoices.Invoice) invoiceResponse {
-	// Платежей пока нет: зачисленная сумма нулевая, в обработке ничего нет. Когда появится
-	// модуль платежей, сюда придут его данные (сумма зачисленных платежей и признак
-	// «есть платёж в обработке»), и статус начнёт меняться.
-	const credited, inProgress = money.Amount(0), false
+	// Платежей пока нет: получено ноль, в обработке ничего нет. Когда появится модуль платежей,
+	// сюда придут его данные (сумма зачисленных платежей до комиссии и признак «есть платёж
+	// в обработке»), и статус начнёт меняться.
+	const received, inProgress = money.Amount(0), false
 	return invoiceResponse{
 		ID:             inv.ID,
 		Amount:         inv.Amount,
-		AmountReceived: credited,
-		Status:         invoices.Status(inv, credited, inProgress, a.now()),
+		AmountReceived: received,
+		Status:         invoices.Status(inv, received, inProgress, a.now()),
 		DepositAddress: inv.DepositAddress,
 		ExpiresAt:      inv.ExpiresAt.UTC(),
 		CreatedAt:      inv.CreatedAt.UTC(),

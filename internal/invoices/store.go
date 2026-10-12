@@ -11,7 +11,7 @@ import (
 // Весь SQL модуля лежит в этом файле. Остальные файлы пакета к базе напрямую не обращаются:
 // в них проверки и порядок шагов. Модуль работает только со схемой invoices.
 
-// invoiceColumns — колонки в порядке полей Invoice, как их читает scanInvoice.
+// invoiceColumns — колонки в порядке полей Invoice, как их читают scanInvoice и selectByKey.
 const invoiceColumns = `id::text, partner_id, amount, fee_bps, deposit_address, expires_at, created_at`
 
 // Querier — то, что нужно запросам: под него подходят и пул (*pgxpool.Pool), и транзакция (pgx.Tx).
@@ -43,10 +43,12 @@ func insertInvoice(ctx context.Context, q Querier, p CreateParams, requestHash [
 // selectByKey читает счёт партнёра по ключу идемпотентности вместе с хэшем запроса,
 // под которым он был создан. found = false, если такого счёта нет.
 func selectByKey(ctx context.Context, q Querier, partnerID int64, key string) (inv Invoice, requestHash []byte, found bool, err error) {
-	inv, err = scanInvoice(q.QueryRow(ctx, `
+	err = q.QueryRow(ctx, `
 		SELECT `+invoiceColumns+`, request_hash
 		FROM invoices.invoices
-		WHERE partner_id = $1 AND idempotency_key = $2`, partnerID, key), &requestHash)
+		WHERE partner_id = $1 AND idempotency_key = $2`, partnerID, key).Scan(
+		&inv.ID, &inv.PartnerID, &inv.Amount, &inv.FeeBps, &inv.DepositAddress,
+		&inv.ExpiresAt, &inv.CreatedAt, &requestHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Invoice{}, nil, false, nil
 	}
@@ -72,11 +74,10 @@ func selectByID(ctx context.Context, q Querier, partnerID int64, id string) (inv
 	return inv, true, nil
 }
 
-// scanInvoice читает строку с колонками invoiceColumns; extra — дополнительные колонки после них.
-func scanInvoice(row pgx.Row, extra ...any) (Invoice, error) {
+// scanInvoice читает строку с колонками invoiceColumns.
+func scanInvoice(row pgx.Row) (Invoice, error) {
 	var inv Invoice
-	dest := append([]any{&inv.ID, &inv.PartnerID, &inv.Amount, &inv.FeeBps, &inv.DepositAddress,
-		&inv.ExpiresAt, &inv.CreatedAt}, extra...)
-	err := row.Scan(dest...)
+	err := row.Scan(&inv.ID, &inv.PartnerID, &inv.Amount, &inv.FeeBps, &inv.DepositAddress,
+		&inv.ExpiresAt, &inv.CreatedAt)
 	return inv, err
 }

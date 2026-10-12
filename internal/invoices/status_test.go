@@ -53,3 +53,23 @@ func TestStatus(t *testing.T) {
 		})
 	}
 }
+
+// Статус сравнивает со счётом сумму до комиссии. Счёт на 100 USDT, ставка 1,5%: клиент прислал
+// 100, партнёру зачислено 98,5. Счёт оплачен; если бы сюда передали 98,5, он навсегда остался бы
+// «частично оплаченным».
+func TestStatusUsesAmountBeforeFee(t *testing.T) {
+	expires := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	inv := invoices.Invoice{Amount: 100_000_000, FeeBps: 150, ExpiresAt: expires}
+	now := expires.Add(-time.Minute)
+
+	fee, err := money.FeeBps(inv.Amount, inv.FeeBps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := invoices.Status(inv, inv.Amount, false, now); got != invoices.StatusPaid {
+		t.Errorf("received the full amount: status = %s, want paid", got)
+	}
+	if got := invoices.Status(inv, inv.Amount-fee, false, now); got != invoices.StatusPartiallyPaid {
+		t.Errorf("amount after fee passed by mistake: status = %s, want partially_paid", got)
+	}
+}
