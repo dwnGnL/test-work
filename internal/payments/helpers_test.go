@@ -88,9 +88,9 @@ func countPayments(t testing.TB, pool *pgxpool.Pool) int {
 	return n
 }
 
-// setStatus ставит платежу статус напрямую, минуя обработчик: решение AML появится на
-// следующем этапе, а тестам нужны платежи во всех статусах. Для credited и rejected CHECK
-// базы требует вердикт AML, поэтому он ставится вместе со статусом.
+// setStatus ставит платежу статус напрямую, минуя обработчик: тестам чтения нужны платежи во
+// всех статусах. Для credited и rejected CHECK базы требует вердикт AML, поэтому он ставится
+// вместе со статусом.
 func setStatus(t testing.TB, pool *pgxpool.Pool, id int64, status payments.Status) {
 	t.Helper()
 	verdict := map[payments.Status]*string{payments.StatusCredited: ptr("low"), payments.StatusRejected: ptr("high")}[status]
