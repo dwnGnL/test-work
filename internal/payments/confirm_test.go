@@ -85,6 +85,24 @@ func TestConfirmReadySingleConfirmation(t *testing.T) {
 	}
 }
 
+// ConfirmReady работает и на одном соединении: так его вызывает сканер, держа блокировку.
+func TestConfirmReadyOnSingleConnection(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewMigrated(t)
+	mustDetect(t, pool, params(t, "aa", 0, 10))
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+
+	if n, err := payments.ConfirmReady(ctx, conn, 12, confirmations); err != nil || n != 1 {
+		t.Fatalf("ConfirmReady on a connection = %d, %v; want 1", n, err)
+	}
+	assertLedger(t, pool, amt(t, "100"))
+}
+
 func TestConfirmReadyRejectsBadConfirmations(t *testing.T) {
 	pool := pgtest.NewMigrated(t)
 	for _, n := range []int{0, -1} {

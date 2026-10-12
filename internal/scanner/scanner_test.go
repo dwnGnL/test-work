@@ -495,6 +495,85 @@ func TestSecondScannerSkipsTheTick(t *testing.T) {
 	f.assertCursor(2)
 }
 
+// Обрыв соединения с блокировкой посреди прохода: проход, который это не заметил бы, довёл бы до
+// порога платёж в блоке, уже выброшенном из сети, и оставил бы деньги в холде. Первый проход
+// читает блок 7, и в этот момент соединение обрывается, сеть переписывается, а второй
+// экземпляр проходит по новой цепочке. Первый обязан закончиться ошибкой и ничего не записать.
+func TestLostConnectionStopsThePass(t *testing.T) {
+	f := newFixture(t)
+	inv := f.newInvoice()
+	ctx := context.Background()
+	f.mine(7)
+
+	var txHash string
+	calls := 0
+	network := &hookChain{Chain: f.sim, onTransfers: func(got []chain.Transfer) []chain.Transfer {
+		calls++
+		if calls != 7 {
+			return got
+		}
+		// События блока 7 прочитаны, сам блок ещё не записан.
+		f.killLockHolder()
+		f.reorg(4, false) // блоки 4-7 заменяются
+		txHash = f.send(usdtTo(t, inv.DepositAddress, "25"))
+		f.mine(2) // новые блоки 4 (с переводом) и 5: у перевода два подтверждения из трёх
+		f.tick()  // второй экземпляр берёт блокировку и идёт по новой цепочке
+		return got
+	}}
+	err := f.newScanner(network).Tick(ctx)
+	if txHash == "" {
+		t.Fatal("the test did not break the connection")
+	}
+	if err == nil {
+		t.Error("the pass that lost its connection finished without an error")
+	}
+
+	if p := f.onlyPayment(inv); p.Status != payments.StatusDetected || p.TxHash != txHash {
+		t.Errorf("payment = %+v, want %s still detected: it has two confirmations of three", p, txHash)
+	}
+	f.assertHold(0)
+	f.assertCursor(5) // блока 7 старой цепочки в курсоре нет
+
+	// Сеть выбрасывает блоки с переводом: после обрыва в холде ничего не висит.
+	f.reorg(2, true)
+	f.tick()
+	if got := f.onlyPayment(inv); got.Status != payments.StatusOrphaned {
+		t.Errorf("status after the reorg = %s, want orphaned", got.Status)
+	}
+	f.assertHold(0)
+}
+
+// После прохода блокировку не держит ни одно соединение: ни после чистого прохода, ни после
+// ошибки (отменённый контекст), ни после паники. Иначе её держало бы простаивающее соединение
+// в пуле, а остальные экземпляры молча пропускали бы проходы.
+func TestPassEndsWithoutLock(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		onHead func(cancel context.CancelFunc)
+	}{
+		{"clean pass", func(context.CancelFunc) {}},
+		{"cancelled context", func(cancel context.CancelFunc) { cancel() }},
+		{"panic", func(context.CancelFunc) { panic("network client bug") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.mine(2)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			network := &hookChain{Chain: f.sim, onHead: func() { tt.onHead(cancel) }}
+			func() {
+				defer func() { _ = recover() }() // паника — часть сценария
+				_ = f.newScanner(network).Tick(ctx)
+			}()
+			f.assertUnlocked()
+
+			f.tick() // блокировка свободна, следующий проход работает
+			f.assertCursor(2)
+		})
+	}
+}
+
 // Два сканера на одной базе, Tick из нескольких горутин, пока добываются блоки: ни дубля платежа,
 // ни дубля проводки, курсор согласован с сетью.
 func TestTwoScannersConcurrently(t *testing.T) {

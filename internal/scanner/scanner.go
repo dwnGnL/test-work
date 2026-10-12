@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,6 +19,10 @@ import (
 // maxRounds — сколько раз за один проход можно вернуться к сверке с сетью, если сеть
 // переписала цепочку, пока сканер её читал. Больше — ErrChainUnstable.
 const maxRounds = 3
+
+// closeTimeout ограничивает закрытие соединения после ошибки прохода: ctx к этому времени
+// мог быть отменён, а закрытие не должно зависнуть на оборванной сети.
+const closeTimeout = 5 * time.Second
 
 // Scanner — сканер блоков. Создаётся через New; Tick делает один проход.
 type Scanner struct {
@@ -41,39 +46,66 @@ func New(pool *pgxpool.Pool, network chain.Chain, confirmations int, usdtContrac
 }
 
 // Tick делает один проход сканера:
-//  1. берёт блокировку «сканер один»: если она у другого экземпляра, проход пропускается без ошибки;
+//  1. берёт из пула одно соединение и блокировку «сканер один» на нём (pg_try_advisory_lock):
+//     если блокировка у другого экземпляра, проход пропускается без ошибки;
 //  2. сверяет свой последний блок с сетью; при расхождении откатывается до общего предка и
 //     переводит платежи выброшенных блоков в orphaned;
 //  3. читает новые блоки по одному, от курсора до головы сети: переводы USDT на депозитные
 //     адреса счетов превращаются в платежи detected;
-//  4. переводит платежи, набравшие N подтверждений, в aml_pending (с проводкой в холд).
+//  4. переводит платежи, набравшие N подтверждений, в aml_pending (с проводкой в холд);
+//  5. снимает блокировку и возвращает соединение в пул.
+//
+// Вся работа с базой в шагах 2-4 идёт через то же соединение, что держит блокировку. Оборвалось
+// соединение — блокировка снята, и следующий запрос прохода падает: «зомби-прохода», который
+// продолжает писать без блокировки, не бывает. После ошибки или паники соединение закрывается,
+// а не возвращается в пул, чтобы блокировка не осталась висеть на нём.
 //
 // Повторный и параллельный вызов безопасны: курсор хранится в базе, блок записывается вместе
 // с платежами одной транзакцией, а платёж уникален по (tx_hash, log_index). Вызывать можно
 // из теста напрямую, без таймера.
 func (s *Scanner) Tick(ctx context.Context) error {
-	// Блокировка живёт, пока открыта эта транзакция. Работы в ней нет: сама работа идёт в
-	// собственных транзакциях на других соединениях, эта нужна только как «аренда» блокировки.
-	return postgres.InTx(ctx, s.pool, func(lease pgx.Tx) error {
-		acquired, err := tryLock(ctx, lease)
-		if err != nil {
-			return err
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("scanner: acquire connection: %w", err)
+	}
+
+	// В пул соединение уходит только чистым: без блокировки или с уже снятой. На остальных
+	// путях, включая панику, его закрывает отложенный вызов.
+	reusable := false
+	defer func() {
+		if reusable {
+			conn.Release()
+		} else {
+			closeConn(ctx, conn)
 		}
-		if !acquired {
-			return nil // другой экземпляр сканера уже работает
-		}
-		return s.pass(ctx)
-	})
+	}()
+
+	acquired, err := tryLock(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		reusable = true // блокировки на соединении нет
+		return nil      // другой экземпляр сканера уже работает
+	}
+	if err := s.pass(ctx, conn); err != nil {
+		return err
+	}
+	if err := unlock(ctx, conn); err != nil {
+		return err
+	}
+	reusable = true
+	return nil
 }
 
 // pass выполняет шаги 2-4. Если сеть переписала цепочку во время чтения блоков, возвращается
 // к сверке (шаг 2); число возвратов ограничено.
-func (s *Scanner) pass(ctx context.Context) error {
+func (s *Scanner) pass(ctx context.Context, conn *pgxpool.Conn) error {
 	for range maxRounds {
-		if err := s.reconcile(ctx); err != nil {
+		if err := s.reconcile(ctx, conn); err != nil {
 			return err
 		}
-		head, stable, err := s.scanNew(ctx)
+		head, stable, err := s.scanNew(ctx, conn)
 		if err != nil {
 			return err
 		}
@@ -81,7 +113,7 @@ func (s *Scanner) pass(ctx context.Context) error {
 			continue
 		}
 
-		confirmed, err := payments.ConfirmReady(ctx, s.pool, head, s.confirmations)
+		confirmed, err := payments.ConfirmReady(ctx, conn, head, s.confirmations)
 		if confirmed > 0 {
 			s.log.Info("payments reached the confirmation threshold", "count", confirmed, "head", head)
 		}
@@ -93,8 +125,8 @@ func (s *Scanner) pass(ctx context.Context) error {
 // reconcile — шаг 2: сверка с сетью. Последний обработанный блок должен совпасть с блоком сети
 // под тем же номером. Если не совпал или такого блока уже нет, идём назад по своим блокам до
 // общего предка и откатываемся до него.
-func (s *Scanner) reconcile(ctx context.Context) error {
-	last, found, err := selectLastBlock(ctx, s.pool)
+func (s *Scanner) reconcile(ctx context.Context, conn *pgxpool.Conn) error {
+	last, found, err := selectLastBlock(ctx, conn)
 	if err != nil || !found {
 		return err // блоков ещё нет: сверять нечего
 	}
@@ -107,7 +139,7 @@ func (s *Scanner) reconcile(ctx context.Context) error {
 	// Нумерация с единицы, поэтому 0 значит «общего блока нет, откатываемся до начала».
 	var ancestor int64
 	for cur := last; ; {
-		prev, found, err := selectBlockBefore(ctx, s.pool, cur.Number)
+		prev, found, err := selectBlockBefore(ctx, conn, cur.Number)
 		if err != nil {
 			return err
 		}
@@ -124,14 +156,14 @@ func (s *Scanner) reconcile(ctx context.Context) error {
 		}
 		cur = prev
 	}
-	return s.rollbackTo(ctx, ancestor, last.Number)
+	return s.rollbackTo(ctx, conn, ancestor, last.Number)
 }
 
 // rollbackTo одной транзакцией стирает свои блоки выше ancestor и переводит платежи из выброшенных
 // блоков в orphaned. lastNumber — номер самого высокого блока, который был у сканера (для лога).
-func (s *Scanner) rollbackTo(ctx context.Context, ancestor, lastNumber int64) error {
+func (s *Scanner) rollbackTo(ctx context.Context, conn *pgxpool.Conn, ancestor, lastNumber int64) error {
 	var dropped, orphaned, confirmed int
-	err := postgres.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err := postgres.InTx(ctx, conn, func(tx pgx.Tx) error {
 		var err error
 		if dropped, err = deleteBlocksFrom(ctx, tx, ancestor+1); err != nil {
 			return err
@@ -166,12 +198,12 @@ func (s *Scanner) onNetwork(ctx context.Context, b chain.Block) (bool, error) {
 // scanNew — шаг 3: читает блоки по одному от курсора + 1 до головы сети. Возвращает голову, на
 // которой остановился. stable = false, если сеть переписала цепочку во время чтения (блока уже
 // нет или его parent_hash не совпал с нашим предыдущим блоком): нужна новая сверка.
-func (s *Scanner) scanNew(ctx context.Context) (head int64, stable bool, err error) {
+func (s *Scanner) scanNew(ctx context.Context, conn *pgxpool.Conn) (head int64, stable bool, err error) {
 	head, err = s.network.Head(ctx)
 	if err != nil {
 		return 0, false, fmt.Errorf("scanner: head of the network: %w", err)
 	}
-	prev, hasPrev, err := selectLastBlock(ctx, s.pool) // без блоков prev.Number = 0: идём с первого
+	prev, hasPrev, err := selectLastBlock(ctx, conn) // без блоков prev.Number = 0: идём с первого
 	if err != nil {
 		return 0, false, err
 	}
@@ -184,7 +216,7 @@ func (s *Scanner) scanNew(ctx context.Context) (head int64, stable bool, err err
 		if !found || (hasPrev && b.ParentHash != prev.Hash) {
 			return head, false, nil
 		}
-		if err := s.processBlock(ctx, b); err != nil {
+		if err := s.processBlock(ctx, conn, b); err != nil {
 			return 0, false, err
 		}
 		prev, hasPrev = b, true
@@ -195,14 +227,14 @@ func (s *Scanner) scanNew(ctx context.Context) (head int64, stable bool, err err
 // processBlock обрабатывает блок целиком: запись о блоке и платежи по всем его переводам —
 // одна транзакция базы. Блок обработан весь или не обработан вовсе, курсор не уходит вперёд
 // платежей. События из сети читаются до открытия транзакции.
-func (s *Scanner) processBlock(ctx context.Context, b chain.Block) error {
+func (s *Scanner) processBlock(ctx context.Context, conn *pgxpool.Conn, b chain.Block) error {
 	transfers, err := s.network.Transfers(ctx, b.Hash)
 	if err != nil {
 		return fmt.Errorf("scanner: transfers of block %d: %w", b.Number, err)
 	}
 
 	detected := 0
-	err = postgres.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	err = postgres.InTx(ctx, conn, func(tx pgx.Tx) error {
 		if err := insertBlock(ctx, tx, b); err != nil {
 			return err
 		}
@@ -250,4 +282,12 @@ func (s *Scanner) detect(ctx context.Context, tx pgx.Tx, b chain.Block, t chain.
 		BlockHash:   b.Hash,
 	})
 	return err == nil, err
+}
+
+// closeConn закрывает соединение, не возвращая его в пул: сессионная блокировка снимается вместе
+// с ним. Ошибку закрытия возвращать некому: соединение уже не нужно.
+func closeConn(ctx context.Context, conn *pgxpool.Conn) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	defer cancel()
+	_ = conn.Hijack().Close(ctx)
 }

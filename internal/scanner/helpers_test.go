@@ -231,6 +231,40 @@ func (f *fixture) assertCursor(head int64) {
 	}
 }
 
+// lockHolders — запрос к блокировкам сессий в базе теста: сканер и симулятор берут только
+// advisory-блокировки, а в базе теста нет других клиентов.
+const lockHolders = `
+	SELECT pid FROM pg_locks
+	WHERE locktype = 'advisory' AND granted
+	  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`
+
+// killLockHolder обрывает соединение, которое держит блокировку сканера, как это делает сетевой
+// сбой, рестарт базы или idle_in_transaction_session_timeout. pg_terminate_backend с таймаутом
+// возвращается, когда процесс уже завершён, значит, блокировка уже снята: ждать по таймеру не нужно.
+func (f *fixture) killLockHolder() {
+	f.t.Helper()
+	var terminated bool
+	err := f.pool.QueryRow(context.Background(),
+		`SELECT pg_terminate_backend(pid, 5000) FROM (`+lockHolders+`) AS holders`).Scan(&terminated)
+	if err != nil || !terminated {
+		f.t.Fatalf("terminate the connection holding the lock: %v, %v", terminated, err)
+	}
+}
+
+// assertUnlocked проверяет, что блокировку сканера не держит ни одно соединение, в том числе
+// простаивающее в пуле.
+func (f *fixture) assertUnlocked() {
+	f.t.Helper()
+	var holders int
+	err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM (`+lockHolders+`) AS holders`).Scan(&holders)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if holders != 0 {
+		f.t.Errorf("%d connections hold the scanner lock after the pass, want none", holders)
+	}
+}
+
 func (f *fixture) logContains(s string) bool { return strings.Contains(f.logs.String(), s) }
 
 // hookChain оборачивает сеть и даёт тесту вмешаться в чтение: подменить события блока или

@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/dwnGnL/test-work/internal/ledger"
 	"github.com/dwnGnL/test-work/internal/money"
@@ -50,6 +49,13 @@ type DetectParams struct {
 	FeeBps      int // ставка счёта; копируется в платёж
 	BlockNumber int64
 	BlockHash   string
+}
+
+// DB — то, что нужно ConfirmReady: начать транзакцию и читать. Подходят и пул (*pgxpool.Pool),
+// и одно соединение (*pgxpool.Conn).
+type DB interface {
+	postgres.Beginner
+	Querier
 }
 
 // Detect записывает перевод, замеченный в блоке. Ключ платежа — (TxHash, LogIndex), блок
@@ -128,20 +134,20 @@ func OrphanFrom(ctx context.Context, tx pgx.Tx, fromBlock int64) (orphaned, affe
 // Возвращает, сколько платежей переведено этим вызовом. Ошибка по одному платежу не мешает
 // остальным: они обрабатываются, а ошибки возвращаются вместе (errors.Join). Платёж с ошибкой
 // остаётся в detected, следующий вызов возьмёт его снова.
-func ConfirmReady(ctx context.Context, pool *pgxpool.Pool, head int64, confirmations int) (confirmed int, err error) {
+func ConfirmReady(ctx context.Context, db DB, head int64, confirmations int) (confirmed int, err error) {
 	if confirmations < 1 {
 		return 0, fmt.Errorf("%w: got %d", ErrInvalidConfirmations, confirmations)
 	}
 	maxBlock := head - int64(confirmations) + 1 // самый высокий блок, у которого уже N подтверждений
 
-	ids, err := selectReady(ctx, pool, maxBlock)
+	ids, err := selectReady(ctx, db, maxBlock)
 	if err != nil {
 		return 0, err
 	}
 
 	var errs []error
 	for _, id := range ids {
-		moved, err := confirmOne(ctx, pool, id, maxBlock)
+		moved, err := confirmOne(ctx, db, id, maxBlock)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("payments: confirm payment %d: %w", id, err))
 			if ctx.Err() != nil {
@@ -158,8 +164,8 @@ func ConfirmReady(ctx context.Context, pool *pgxpool.Pool, head int64, confirmat
 
 // confirmOne переводит один платёж в aml_pending и проводит hold в одной транзакции.
 // moved = false, если платёж уже обработан или больше не готов: тогда проводки нет.
-func confirmOne(ctx context.Context, pool *pgxpool.Pool, id, maxBlock int64) (moved bool, err error) {
-	err = postgres.InTx(ctx, pool, func(tx pgx.Tx) error {
+func confirmOne(ctx context.Context, db DB, id, maxBlock int64) (moved bool, err error) {
+	err = postgres.InTx(ctx, db, func(tx pgx.Tx) error {
 		amount, ok, err := markAMLPending(ctx, tx, id, maxBlock)
 		if err != nil || !ok {
 			return err

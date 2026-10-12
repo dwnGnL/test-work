@@ -17,19 +17,34 @@ import (
 // в одной базе, поэтому ключи у них разные (у симулятора 4001).
 const lockKey = 4002
 
-// querier — то, что нужно чтению: под него подходят и пул (*pgxpool.Pool), и транзакция (pgx.Tx).
+// querier — то, что нужно чтению: под него подходят и соединение (*pgxpool.Conn), и пул
+// (*pgxpool.Pool), и транзакция (pgx.Tx).
 type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// tryLock пробует взять блокировку до конца транзакции, не дожидаясь. false — её держит
-// другой экземпляр сканера. Блокировка снимается сама при коммите, откате и обрыве соединения.
-func tryLock(ctx context.Context, tx pgx.Tx) (bool, error) {
+// tryLock пробует взять блокировку сессии, не дожидаясь. false — её держит другой экземпляр
+// сканера. Блокировка принадлежит соединению q: снимается через unlock на нём же или сама,
+// когда соединение закрыто или оборвалось.
+func tryLock(ctx context.Context, q querier) (bool, error) {
 	var acquired bool
-	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, int64(lockKey)).Scan(&acquired); err != nil {
+	if err := q.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, int64(lockKey)).Scan(&acquired); err != nil {
 		return false, fmt.Errorf("scanner: try lock: %w", err)
 	}
 	return acquired, nil
+}
+
+// unlock снимает блокировку, взятую tryLock на том же соединении q. Если блокировки у соединения
+// уже нет, это ErrLockLost.
+func unlock(ctx context.Context, q querier) error {
+	var released bool
+	if err := q.QueryRow(ctx, `SELECT pg_advisory_unlock($1)`, int64(lockKey)).Scan(&released); err != nil {
+		return fmt.Errorf("scanner: unlock: %w", err)
+	}
+	if !released {
+		return ErrLockLost
+	}
+	return nil
 }
 
 // selectLastBlock возвращает последний обработанный блок (курсор). found = false, если блоков нет.
