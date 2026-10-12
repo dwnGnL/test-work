@@ -107,7 +107,7 @@ func (p DetectParams) validate() error {
 // у таких платежей нет, поэтому откатывать нечего.
 //
 // Платежи, уже прошедшие порог (aml_pending, credited, rejected), не меняются, а только считаются
-// в affectedConfirmed: реорг глубже порога в коде не обрабатывается (решение в NOTES.md), и
+// в affectedConfirmed: реорг глубже порога в коде не обрабатывается (см. README, «Допущения и упрощения»), и
 // вызывающий пишет об этом ошибку в лог. Пишет в транзакцию вызывающего.
 func OrphanFrom(ctx context.Context, tx pgx.Tx, fromBlock int64) (orphaned, affectedConfirmed int, err error) {
 	orphaned, err = orphanDetected(ctx, tx, fromBlock)
