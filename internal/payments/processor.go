@@ -25,6 +25,9 @@ const (
 	// удваивается (5 с, 10 с, 20 с ...), но не дольше amlMaxPause.
 	amlFirstPause = 5 * time.Second
 	amlMaxPause   = 5 * time.Minute
+	// amlCallTimeout — сколько ждём ответа AML по одному платежу. Меньше amlFirstPause: иначе
+	// пауза истекла бы, пока первый воркер ещё ждёт ответа, и платёж взял бы второй.
+	amlCallTimeout = 3 * time.Second
 
 	// Виды проводок шага 2 («решение по платежу»); ключ у них один, см. decisionKey.
 	creditKind = "credit"
@@ -35,21 +38,23 @@ const (
 // принимает решение по платежу — зачисляет партнёру за вычетом комиссии или отклоняет и создаёт
 // возврат. Создаётся через NewProcessor; Tick делает один проход.
 type Processor struct {
-	pool    *pgxpool.Pool
-	checker aml.Checker
-	log     *slog.Logger
-	now     func() time.Time // часы; подменяются в тестах
+	pool       *pgxpool.Pool
+	checker    aml.Checker
+	log        *slog.Logger
+	now        func() time.Time // часы; подменяются в тестах
+	amlTimeout time.Duration    // таймаут одного вызова AML; в тестах укорачивается
 }
 
 // NewProcessor возвращает обработчик платежей.
 func NewProcessor(pool *pgxpool.Pool, checker aml.Checker, log *slog.Logger) *Processor {
-	return &Processor{pool: pool, checker: checker, log: log, now: time.Now}
+	return &Processor{pool: pool, checker: checker, log: log, now: time.Now, amlTimeout: amlCallTimeout}
 }
 
 // Tick делает один проход:
 //  1. захват: берёт пачку платежей aml_pending, чья очередь проверки пришла, увеличивает им
 //     счётчик попыток и откладывает следующую попытку (см. claimForAML);
-//  2. проверка: для каждого платежа спрашивает AML вне транзакции базы. Ошибка AML пишется в лог,
+//  2. проверка: для каждого платежа спрашивает AML вне транзакции базы, с таймаутом на вызов.
+//     Ошибка AML (в том числе таймаут) пишется в лог,
 //     платёж остаётся в aml_pending, деньги в холде, баланс партнёра не меняется; платёж вернётся
 //     в работу, когда истечёт пауза;
 //  3. решение: одной транзакцией меняет статус (условно), проводит шаг 2 и, если риск высокий,
@@ -88,8 +93,11 @@ func (p *Processor) Tick(ctx context.Context) error {
 // process проверяет один захваченный платёж в AML и принимает решение.
 func (p *Processor) process(ctx context.Context, pay Payment) error {
 	// Внешний вызов вне транзакции базы: ответ может прийти не сразу, а открытая транзакция
-	// держала бы соединение и блокировки.
-	verdict, err := p.checker.Check(ctx, pay.From)
+	// держала бы соединение и блокировки. У вызова свой таймаут: зависший провайдер не должен
+	// останавливать остальные платежи пачки и мешать остановке сервиса.
+	callCtx, cancel := context.WithTimeout(ctx, p.amlTimeout)
+	verdict, err := p.checker.Check(callCtx, pay.From)
+	cancel()
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
