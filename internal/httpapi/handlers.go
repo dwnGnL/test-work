@@ -175,7 +175,9 @@ func writeDecodeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, money.ErrSyntax), errors.Is(err, money.ErrPrecision), errors.Is(err, money.ErrOverflow):
 		writeError(w, http.StatusBadRequest, codeInvalidAmount, "amount: "+err.Error())
 	default:
-		// Неизвестное поле, сумма не строкой, null, не тот тип: текст ошибки описывает вход клиента.
-		writeError(w, http.StatusBadRequest, codeInvalidBody, err.Error())
+		// Неизвестное поле, сумма не строкой, null, не тот тип. Текст ошибки декодера наружу
+		// не отдаём: в нём имена внутренних типов Go.
+		writeError(w, http.StatusBadRequest, codeInvalidBody,
+			`request body must be a JSON object with a single string field "amount"`)
 	}
 }

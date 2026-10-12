@@ -339,6 +339,20 @@ func TestCreateInvoiceBadBody(t *testing.T) {
 }
 
 // Тело больше предела отклоняется: и когда лишнее внутри объекта, и когда после него.
+// В ответе на неверное тело нет текста декодера: в нём имена внутренних типов Go.
+func TestBadBodyDoesNotLeakInternals(t *testing.T) {
+	f := newFixture(t)
+	for _, body := range []string{`[]`, `1`, `"x"`, `{"amount":100}`, `{"amount":null}`, `{"sum":"1"}`} {
+		rec := f.createInvoice(keyAlpha, "leak-"+body, body)
+		wantError(t, rec, http.StatusBadRequest, "invalid_body")
+		for _, leak := range []string{"Go value", "httpapi", "unmarshal", "json:"} {
+			if strings.Contains(rec.Body.String(), leak) {
+				t.Errorf("body %s: response leaks %q: %s", body, leak, rec.Body.String())
+			}
+		}
+	}
+}
+
 func TestCreateInvoiceBodyTooLarge(t *testing.T) {
 	f := newFixture(t)
 
