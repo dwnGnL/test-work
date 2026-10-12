@@ -20,6 +20,9 @@ const (
 	scale = 1_000_000
 	// maxBps — 100% в базисных пунктах.
 	maxBps = 10_000
+	// halfBps — половина maxBps. Прибавляется перед делением на maxBps, чтобы
+	// целочисленное деление округляло до ближайшего, а не вниз.
+	halfBps = 5_000
 )
 
 // Amount — сумма в минимальных единицах (10⁻⁶ USDT).
@@ -141,5 +144,5 @@ func FeeBps(amount Amount, bps int) (Amount, error) {
 	}
 	a, b := int64(amount), int64(bps)
 	q, r := a/maxBps, a%maxBps
-	return Amount(q*b + (r*b+maxBps/2)/maxBps), nil
+	return Amount(q*b + (r*b+halfBps)/maxBps), nil
 }
