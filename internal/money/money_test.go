@@ -255,8 +255,8 @@ func TestFeeBps(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := FeeBps(tt.amount, tt.bps); got != tt.want {
-				t.Errorf("FeeBps(%d, %d) = %d, want %d", int64(tt.amount), tt.bps, int64(got), int64(tt.want))
+			if got, err := FeeBps(tt.amount, tt.bps); err != nil || got != tt.want {
+				t.Errorf("FeeBps(%d, %d) = %d, %v; want %d, nil", int64(tt.amount), tt.bps, int64(got), err, int64(tt.want))
 			}
 			// Ожидание из таблицы не должно расходиться с эталонным расчётом.
 			if want := feeBig(tt.amount, tt.bps); tt.want != want {
@@ -283,9 +283,10 @@ func TestFeeBpsMatchesBigIntReference(t *testing.T) {
 
 	check := func(a Amount, bps int) {
 		t.Helper()
-		got, want := FeeBps(a, bps), feeBig(a, bps)
-		if got != want {
-			t.Fatalf("FeeBps(%d, %d) = %d, want %d", int64(a), bps, int64(got), int64(want))
+		got, err := FeeBps(a, bps)
+		want := feeBig(a, bps)
+		if err != nil || got != want {
+			t.Fatalf("FeeBps(%d, %d) = %d, %v; want %d, nil", int64(a), bps, int64(got), err, int64(want))
 		}
 		if got < 0 || got > a {
 			t.Fatalf("FeeBps(%d, %d) = %d: outside [0, amount]", int64(a), bps, int64(got))
@@ -307,7 +308,10 @@ func TestFeeBpsMonotonic(t *testing.T) {
 	for _, bps := range []int{1, 50, 150, 5000, 9999} {
 		var prev Amount
 		for a := Amount(0); a < 30_000; a++ {
-			got := FeeBps(a, bps)
+			got, err := FeeBps(a, bps)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got < prev {
 				t.Fatalf("FeeBps(%d, %d) = %d < FeeBps(%d, %d) = %d", a, bps, got, a-1, bps, prev)
 			}
@@ -316,7 +320,8 @@ func TestFeeBpsMonotonic(t *testing.T) {
 	}
 }
 
-func TestFeeBpsPanicsOnInvalidArguments(t *testing.T) {
+// Недопустимые аргументы дают ошибку и нулевую комиссию, а не панику и не «какое-то» число.
+func TestFeeBpsRejectsInvalidArguments(t *testing.T) {
 	tests := []struct {
 		name   string
 		amount Amount
@@ -329,12 +334,10 @@ func TestFeeBpsPanicsOnInvalidArguments(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("FeeBps(%d, %d) did not panic", int64(tt.amount), tt.bps)
-				}
-			}()
-			FeeBps(tt.amount, tt.bps)
+			got, err := FeeBps(tt.amount, tt.bps)
+			if got != 0 || !errors.Is(err, ErrInvalidFeeArgs) {
+				t.Errorf("FeeBps(%d, %d) = %d, %v; want 0, ErrInvalidFeeArgs", int64(tt.amount), tt.bps, int64(got), err)
+			}
 		})
 	}
 }
@@ -342,7 +345,7 @@ func TestFeeBpsPanicsOnInvalidArguments(t *testing.T) {
 func BenchmarkFeeBps(b *testing.B) {
 	var sink Amount
 	for i := 0; i < b.N; i++ {
-		sink = FeeBps(math.MaxInt64-Amount(i&0xff), 150)
+		sink, _ = FeeBps(math.MaxInt64-Amount(i&0xff), 150)
 	}
 	_ = sink
 }

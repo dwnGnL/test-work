@@ -21,9 +21,10 @@ type Amount int64
 
 // Ошибки Parse. Возвращаются обёрнутыми, проверять через errors.Is.
 var (
-	ErrSyntax    = errors.New("money: invalid syntax")
-	ErrPrecision = errors.New("money: too many decimal places")
-	ErrOverflow  = errors.New("money: amount overflows int64")
+	ErrSyntax         = errors.New("money: invalid syntax")
+	ErrPrecision      = errors.New("money: too many decimal places")
+	ErrOverflow       = errors.New("money: amount overflows int64")
+	ErrInvalidFeeArgs = errors.New("money: fee arguments out of range")
 )
 
 const scale = 1_000_000 // 10^Decimals
@@ -129,14 +130,15 @@ const maxBps = 10_000
 // нацело, его можно вынести из-под floor: результат = q·bps + floor((r·bps + 5000) / 10000).
 // Переполнения нет: q·bps ≤ amount (bps ≤ 10000), а r·bps + 5000 < 10⁸.
 //
-// Аргументы вне допустимых границ (amount < 0, bps вне 0..10000) — ошибка
-// программиста, а не данных: в базе их не пропускают CHECK-ограничения.
-// Функция паникует, чтобы такая ошибка не превратилась в неверную комиссию.
-func FeeBps(amount Amount, bps int) Amount {
+// Аргументы вне допустимых границ (amount < 0, bps вне 0..10000) дают ErrInvalidFeeArgs.
+// В базе такие значения не пропускают CHECK-ограничения, поэтому ошибка означает дефект
+// в вызывающем коде. Она возвращается, а не превращается в панику: фоновый обработчик
+// не должен падать целиком из-за одного платежа.
+func FeeBps(amount Amount, bps int) (Amount, error) {
 	if amount < 0 || bps < 0 || bps > maxBps {
-		panic(fmt.Sprintf("money: FeeBps: invalid arguments amount=%d bps=%d", int64(amount), bps))
+		return 0, fmt.Errorf("%w: amount=%d bps=%d", ErrInvalidFeeArgs, int64(amount), bps)
 	}
 	a, b := int64(amount), int64(bps)
 	q, r := a/maxBps, a%maxBps
-	return Amount(q*b + (r*b+maxBps/2)/maxBps)
+	return Amount(q*b + (r*b+maxBps/2)/maxBps), nil
 }
