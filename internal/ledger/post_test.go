@@ -197,7 +197,15 @@ func TestPostRejectsInvalidBeforeDB(t *testing.T) {
 		{"one line", with(func(p *ledger.Posting) { p.Lines = p.Lines[:1] }), ledger.ErrTooFewLines},
 		{"zero amount", with(func(p *ledger.Posting) {
 			p.Lines = append(p.Lines, ledger.Credit(ledger.AccountRevenueFees, 0))
-		}), ledger.ErrZeroAmount},
+		}), ledger.ErrNonPositiveAmount},
+		// Минус не должен молча превратить дебет в кредит: пара ниже в сумме даёт ноль.
+		{"negative amounts that still balance", with(func(p *ledger.Posting) {
+			p.Lines[0] = ledger.Debit(ledger.AccountDeposits, -a100)
+			p.Lines[1] = ledger.Credit(ledger.AccountHoldAML, -a100)
+		}), ledger.ErrNonPositiveAmount},
+		{"line built without Debit or Credit", with(func(p *ledger.Posting) {
+			p.Lines[0] = ledger.Line{Account: ledger.AccountDeposits, Amount: a100}
+		}), ledger.ErrBadSide},
 		{"debit exceeds credit", with(func(p *ledger.Posting) {
 			p.Lines[1] = ledger.Credit(ledger.AccountHoldAML, a100-1)
 		}), ledger.ErrUnbalanced},
@@ -314,28 +322,16 @@ func TestPostConcurrentSameKey(t *testing.T) {
 	})
 }
 
-// Debit и Credit задают знак: дебет > 0, кредит < 0. Базы не нужно.
-func TestLineSigns(t *testing.T) {
-	if got := ledger.Debit("a", 5); got != (ledger.Line{Account: "a", Amount: 5}) {
-		t.Errorf("Debit = %+v, want amount +5", got)
+// Debit и Credit задают сторону, сумма в строке остаётся положительной. Базы не нужно.
+func TestLineSides(t *testing.T) {
+	if got := ledger.Debit("a", 5); got != (ledger.Line{Account: "a", Side: ledger.SideDebit, Amount: 5}) {
+		t.Errorf("Debit = %+v, want debit side, amount 5", got)
 	}
-	if got := ledger.Credit("a", 5); got != (ledger.Line{Account: "a", Amount: -5}) {
-		t.Errorf("Credit = %+v, want amount -5", got)
+	if got := ledger.Credit("a", 5); got != (ledger.Line{Account: "a", Side: ledger.SideCredit, Amount: 5}) {
+		t.Errorf("Credit = %+v, want credit side, amount 5", got)
 	}
 	if got := ledger.PartnerAccount(42); got != "partner:42" {
 		t.Errorf("PartnerAccount(42) = %q, want partner:42", got)
-	}
-
-	// Отрицательная сумма — ошибка программиста: молча перевернуть знак нельзя.
-	for name, build := range map[string]func(string, money.Amount) ledger.Line{"Debit": ledger.Debit, "Credit": ledger.Credit} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("%s with a negative amount did not panic", name)
-				}
-			}()
-			build("a", -1)
-		}()
 	}
 }
 

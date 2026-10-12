@@ -15,13 +15,14 @@ import (
 
 // Ошибки Post. Возвращаются как есть или обёрнутыми, проверять через errors.Is.
 var (
-	ErrEmptyKey       = errors.New("ledger: empty idempotency key")
-	ErrEmptyKind      = errors.New("ledger: empty posting kind")
-	ErrTooFewLines    = errors.New("ledger: posting needs at least two lines")
-	ErrZeroAmount     = errors.New("ledger: line with zero amount")
-	ErrUnbalanced     = errors.New("ledger: lines do not sum to zero")
-	ErrUnknownAccount = errors.New("ledger: unknown account")
-	ErrKeyConflict    = errors.New("ledger: idempotency key is already used with different content")
+	ErrEmptyKey          = errors.New("ledger: empty idempotency key")
+	ErrEmptyKind         = errors.New("ledger: empty posting kind")
+	ErrTooFewLines       = errors.New("ledger: posting needs at least two lines")
+	ErrBadSide           = errors.New("ledger: line side must be debit or credit")
+	ErrNonPositiveAmount = errors.New("ledger: line amount must be positive")
+	ErrUnbalanced        = errors.New("ledger: lines do not sum to zero")
+	ErrUnknownAccount    = errors.New("ledger: unknown account")
+	ErrKeyConflict       = errors.New("ledger: idempotency key is already used with different content")
 )
 
 // KeyConflictError уточняет ErrKeyConflict: под ключом уже записана проводка вида StoredKind.
@@ -39,32 +40,37 @@ func (e *KeyConflictError) Error() string {
 // Is сохраняет проверку errors.Is(err, ErrKeyConflict).
 func (e *KeyConflictError) Is(target error) bool { return target == ErrKeyConflict }
 
-// Line — одна проводка со знаком: дебет > 0, кредит < 0.
+// Side — сторона строки проводки.
+type Side int8
+
+const (
+	SideDebit  Side = 1
+	SideCredit Side = -1
+)
+
+// Line — одна строка проводки: счёт, сторона и сумма. Сумма всегда положительная,
+// направление задаёт сторона. Нулевое значение Side недопустимо, поэтому строку,
+// собранную без Debit или Credit, Post отклонит.
 type Line struct {
 	Account string
+	Side    Side
 	Amount  money.Amount
 }
 
-// Debit — дебет счёта на amount (amount > 0). Ноль не паникует: Post отклонит его
-// как ErrZeroAmount (например, нулевую комиссию вызывающий должен просто не добавлять).
-// Отрицательная сумма — ошибка программиста: знак задаёт конструктор, а не вызывающий,
-// иначе дебет молча превратился бы в кредит. Как и в money.FeeBps, это паника.
+// Debit — дебет счёта на amount.
 func Debit(account string, amount money.Amount) Line {
-	mustNotBeNegative(amount)
-	return Line{Account: account, Amount: amount}
+	return Line{Account: account, Side: SideDebit, Amount: amount}
 }
 
-// Credit — кредит счёта на amount (amount > 0), в проводке хранится как -amount.
-// Правила для нуля и отрицательных сумм те же, что у Debit.
+// Credit — кредит счёта на amount.
 func Credit(account string, amount money.Amount) Line {
-	mustNotBeNegative(amount)
-	return Line{Account: account, Amount: -amount}
+	return Line{Account: account, Side: SideCredit, Amount: amount}
 }
 
-func mustNotBeNegative(amount money.Amount) {
-	if amount < 0 {
-		panic(fmt.Sprintf("ledger: Debit/Credit: negative amount %d", int64(amount)))
-	}
+// signed возвращает сумму со знаком, как она хранится в журнале: дебет > 0, кредит < 0.
+// Вызывать только после validate: сумма уже проверена на положительность.
+func (l Line) signed() int64 {
+	return int64(l.Side) * int64(l.Amount)
 }
 
 // Posting — одна операция по журналу: набор проводок под одним ключом идемпотентности.
@@ -89,10 +95,15 @@ func (p Posting) validate() error {
 
 	var sum int64
 	for _, l := range p.Lines {
-		a := int64(l.Amount)
-		if a == 0 {
-			return fmt.Errorf("%w: account %q", ErrZeroAmount, l.Account)
+		if l.Side != SideDebit && l.Side != SideCredit {
+			return fmt.Errorf("%w: account %q", ErrBadSide, l.Account)
 		}
+		// Ноль и минус отклоняем здесь, а не паникой в конструкторе: например, нулевую
+		// комиссию вызывающий должен просто не добавлять строкой.
+		if l.Amount <= 0 {
+			return fmt.Errorf("%w: account %q, amount %d", ErrNonPositiveAmount, l.Account, int64(l.Amount))
+		}
+		a := l.signed()
 		next := sum + a
 		// Переполнение int64: иначе сумма могла бы «обернуться» ровно в ноль.
 		if (a > 0 && next < sum) || (a < 0 && next > sum) {
@@ -148,7 +159,7 @@ func Post(ctx context.Context, tx pgx.Tx, p Posting) (posted bool, err error) {
 	for i, l := range p.Lines {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO ledger.entries (transaction_id, account_id, amount) VALUES ($1, $2, $3)`,
-			txID, accountIDs[i], int64(l.Amount))
+			txID, accountIDs[i], l.signed())
 		if err != nil {
 			return false, fmt.Errorf("ledger: insert entry for %q: %w", l.Account, err)
 		}
@@ -190,25 +201,39 @@ func checkStored(ctx context.Context, tx pgx.Tx, p Posting) error {
 	if err != nil {
 		return fmt.Errorf("ledger: load entries of %q: %w", p.Key, err)
 	}
-	stored, err := pgx.CollectRows(rows, pgx.RowToStructByPos[Line])
+	stored, err := pgx.CollectRows(rows, pgx.RowToStructByPos[entry])
 	if err != nil {
 		return fmt.Errorf("ledger: load entries of %q: %w", p.Key, err)
 	}
 
-	if kind != p.Kind || !sameLines(stored, p.Lines) {
+	if kind != p.Kind || !sameEntries(stored, entriesOf(p.Lines)) {
 		return &KeyConflictError{Key: p.Key, StoredKind: kind}
 	}
 	return nil
 }
 
-// sameLines сравнивает наборы строк без учёта порядка.
-func sameLines(a, b []Line) bool {
+// entry — строка проводки в том виде, в каком она лежит в журнале: сумма со знаком.
+type entry struct {
+	Account string
+	Amount  int64
+}
+
+func entriesOf(lines []Line) []entry {
+	out := make([]entry, len(lines))
+	for i, l := range lines {
+		out[i] = entry{Account: l.Account, Amount: l.signed()}
+	}
+	return out
+}
+
+// sameEntries сравнивает наборы строк без учёта порядка.
+func sameEntries(a, b []entry) bool {
 	a, b = slices.Clone(a), slices.Clone(b)
-	slices.SortFunc(a, compareLines)
-	slices.SortFunc(b, compareLines)
+	slices.SortFunc(a, compareEntries)
+	slices.SortFunc(b, compareEntries)
 	return slices.Equal(a, b)
 }
 
-func compareLines(x, y Line) int {
+func compareEntries(x, y entry) int {
 	return cmp.Or(strings.Compare(x.Account, y.Account), cmp.Compare(x.Amount, y.Amount))
 }
