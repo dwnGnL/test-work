@@ -9,13 +9,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/dwnGnL/test-work/internal/chain"
 	"github.com/dwnGnL/test-work/internal/config"
 	"github.com/dwnGnL/test-work/internal/httpapi"
 	"github.com/dwnGnL/test-work/internal/partners"
 	"github.com/dwnGnL/test-work/internal/platform/postgres"
+	"github.com/dwnGnL/test-work/internal/scanner"
 	"github.com/dwnGnL/test-work/migrations"
 )
 
@@ -59,9 +62,31 @@ func run(log *slog.Logger) error {
 			"names", "alpha, beta")
 	}
 
+	// Сеть — симулятор, её состояние лежит в базе. Сканер читает её через интерфейс chain.Chain.
+	simulator := chain.NewSimulator(pool)
+	opts := httpapi.Options{InvoiceTTL: cfg.InvoiceTTL, USDTContract: cfg.USDTContract}
+	if cfg.SimAPI {
+		opts.Simulator = simulator
+		log.Warn("simulator control endpoints /sim/* are enabled without authentication (SIM_API); do not use outside local runs")
+	}
+
+	// Сканер блоков работает в фоне до остановки сервиса; перед выходом его дожидаются,
+	// иначе проход мог бы оборваться на закрытом пуле.
+	scanCtx, stopScan := context.WithCancel(ctx)
+	var scanWG sync.WaitGroup
+	scanWG.Add(1)
+	go func() {
+		defer scanWG.Done()
+		scanLoop(scanCtx, scanner.New(pool, simulator, cfg.Confirmations, cfg.USDTContract, log), cfg.ScanInterval, log)
+	}()
+	defer func() {
+		stopScan()
+		scanWG.Wait()
+	}()
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.New(pool, log, cfg.InvoiceTTL),
+		Handler:           httpapi.New(pool, log, opts),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -73,6 +98,8 @@ func run(log *slog.Logger) error {
 		"addr", cfg.HTTPAddr,
 		"confirmations", cfg.Confirmations,
 		"invoice_ttl", cfg.InvoiceTTL.String(),
+		"scan_interval", cfg.ScanInterval.String(),
+		"sim_api", cfg.SimAPI,
 		"usdt_contract", cfg.USDTContract,
 		"aml_blacklist_size", len(cfg.AMLBlacklist))
 
@@ -98,4 +125,22 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("server stopped")
 	return nil
+}
+
+// scanLoop вызывает Tick сканера по таймеру, пока ctx не отменён. Ошибка прохода пишется в лог,
+// сканер продолжает со следующего прохода: курсор в базе, потерять нечего. Отмена контекста при
+// остановке сервиса ошибкой не считается.
+func scanLoop(ctx context.Context, s *scanner.Scanner, interval time.Duration, log *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.Tick(ctx); err != nil && ctx.Err() == nil {
+				log.Error("scanner tick failed", "err", err)
+			}
+		}
+	}
 }

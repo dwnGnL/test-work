@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"github.com/dwnGnL/test-work/internal/invoices"
 	"github.com/dwnGnL/test-work/internal/ledger"
 	"github.com/dwnGnL/test-work/internal/money"
+	"github.com/dwnGnL/test-work/internal/payments"
 )
 
 const (
@@ -17,6 +19,8 @@ const (
 	idempotencyHeader = "Idempotency-Key"
 	// maxBodyBytes — предел тела запроса; настоящее тело занимает десятки байт.
 	maxBodyBytes = 1 << 10
+	// invoiceBodyShape — сообщение, если тело запроса на создание счёта не того вида.
+	invoiceBodyShape = `request body must be a JSON object with a single string field "amount"`
 )
 
 // createInvoiceRequest — тело POST /v1/invoices.
@@ -25,15 +29,25 @@ type createInvoiceRequest struct {
 }
 
 // invoiceResponse — счёт в ответе API. Суммы строками (money.Amount кодируется строкой),
-// времена в RFC 3339, UTC.
+// времена в RFC 3339, UTC. Payments — все платежи счёта, включая откатившиеся (orphaned).
 type invoiceResponse struct {
-	ID             string       `json:"id"`
-	Amount         money.Amount `json:"amount"`
-	AmountReceived money.Amount `json:"amount_received"`
-	Status         string       `json:"status"`
-	DepositAddress string       `json:"deposit_address"`
-	ExpiresAt      time.Time    `json:"expires_at"`
-	CreatedAt      time.Time    `json:"created_at"`
+	ID             string            `json:"id"`
+	Amount         money.Amount      `json:"amount"`
+	AmountReceived money.Amount      `json:"amount_received"`
+	Status         string            `json:"status"`
+	DepositAddress string            `json:"deposit_address"`
+	ExpiresAt      time.Time         `json:"expires_at"`
+	CreatedAt      time.Time         `json:"created_at"`
+	Payments       []paymentResponse `json:"payments"`
+}
+
+// paymentResponse — платёж в ответе по счёту. BlockNumber равен null, пока у платежа нет блока
+// (платёж orphaned: блок выброшен реоргом).
+type paymentResponse struct {
+	TxHash      string       `json:"tx_hash"`
+	Amount      money.Amount `json:"amount"`
+	Status      string       `json:"status"`
+	BlockNumber *int64       `json:"block_number"`
 }
 
 // balanceResponse — тело GET /v1/balance.
@@ -53,9 +67,9 @@ func (a *API) createInvoice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeIdempotencyKeyRequired, idempotencyHeader+" header is required")
 		return
 	}
-	req, err := decodeCreateRequest(w, r)
+	req, err := decodeBody[createInvoiceRequest](w, r)
 	if err != nil {
-		writeDecodeError(w, err)
+		writeDecodeError(w, err, invoiceBodyShape)
 		return
 	}
 
@@ -77,9 +91,9 @@ func (a *API) createInvoice(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		a.internalError(w, r, err)
 	case created:
-		a.writeJSON(w, r, http.StatusCreated, a.toInvoiceResponse(inv))
+		a.writeInvoice(w, r, http.StatusCreated, inv)
 	default:
-		a.writeJSON(w, r, http.StatusOK, a.toInvoiceResponse(inv))
+		a.writeInvoice(w, r, http.StatusOK, inv)
 	}
 }
 
@@ -98,7 +112,7 @@ func (a *API) getInvoice(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, r, err)
 		return
 	}
-	a.writeJSON(w, r, http.StatusOK, a.toInvoiceResponse(inv))
+	a.writeInvoice(w, r, http.StatusOK, inv)
 }
 
 // getBalance обрабатывает GET /v1/balance: баланс только того партнёра, что вошёл.
@@ -115,12 +129,34 @@ func (a *API) getBalance(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, r, http.StatusOK, balanceResponse{Balance: balance})
 }
 
-// toInvoiceResponse собирает ответ по счёту.
-func (a *API) toInvoiceResponse(inv invoices.Invoice) invoiceResponse {
-	// Платежей пока нет: получено ноль, в обработке ничего нет. Когда появится модуль платежей,
-	// сюда придут его данные (сумма зачисленных платежей до комиссии и признак «есть платёж
-	// в обработке»), и статус начнёт меняться.
-	const received, inProgress = money.Amount(0), false
+// writeInvoice отвечает счётом, собранным по данным модуля payments.
+func (a *API) writeInvoice(w http.ResponseWriter, r *http.Request, status int, inv invoices.Invoice) {
+	resp, err := a.toInvoiceResponse(r.Context(), inv)
+	if err != nil {
+		a.internalError(w, r, err)
+		return
+	}
+	a.writeJSON(w, r, status, resp)
+}
+
+// toInvoiceResponse собирает ответ по счёту: сумма полученного (платежи credited, до комиссии)
+// и статус считаются по payments.Summary, список платежей берётся из payments.ListByInvoice.
+// Это два отдельных чтения, поэтому во время смены статуса платежа они могут разойтись на один
+// запрос; следующий запрос покажет согласованное состояние.
+func (a *API) toInvoiceResponse(ctx context.Context, inv invoices.Invoice) (invoiceResponse, error) {
+	received, inProgress, err := payments.Summary(ctx, a.db, inv.ID)
+	if err != nil {
+		return invoiceResponse{}, err
+	}
+	list, err := payments.ListByInvoice(ctx, a.db, inv.ID)
+	if err != nil {
+		return invoiceResponse{}, err
+	}
+
+	items := make([]paymentResponse, len(list)) // пустой массив, а не null, когда платежей нет
+	for i, p := range list {
+		items[i] = paymentResponse{TxHash: p.TxHash, Amount: p.Amount, Status: string(p.Status), BlockNumber: p.BlockNumber}
+	}
 	return invoiceResponse{
 		ID:             inv.ID,
 		Amount:         inv.Amount,
@@ -129,18 +165,19 @@ func (a *API) toInvoiceResponse(inv invoices.Invoice) invoiceResponse {
 		DepositAddress: inv.DepositAddress,
 		ExpiresAt:      inv.ExpiresAt.UTC(),
 		CreatedAt:      inv.CreatedAt.UTC(),
-	}
+		Payments:       items,
+	}, nil
 }
 
-// decodeCreateRequest строго разбирает тело: размер ограничен, неизвестные поля и данные
+// decodeBody строго разбирает тело запроса в T: размер ограничен, неизвестные поля и данные
 // после объекта не допускаются. Сумма принимается только JSON-строкой (см. money.Amount).
-func decodeCreateRequest(w http.ResponseWriter, r *http.Request) (createInvoiceRequest, error) {
+func decodeBody[T any](w http.ResponseWriter, r *http.Request) (T, error) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	dec.DisallowUnknownFields()
 
-	var req createInvoiceRequest
+	var zero, req T
 	if err := dec.Decode(&req); err != nil {
-		return createInvoiceRequest{}, err
+		return zero, err
 	}
 	// После объекта допустимы только пробелы: следующий токен обязан быть концом тела.
 	_, err := dec.Token()
@@ -148,19 +185,20 @@ func decodeCreateRequest(w http.ResponseWriter, r *http.Request) (createInvoiceR
 	case errors.Is(err, io.EOF):
 		return req, nil
 	case err == nil:
-		return createInvoiceRequest{}, errTrailingData
+		return zero, errTrailingData
 	default:
 		// Мусор вместо JSON или превышение размера на втором чтении.
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			return createInvoiceRequest{}, err
+			return zero, err
 		}
-		return createInvoiceRequest{}, errTrailingData
+		return zero, errTrailingData
 	}
 }
 
 // writeDecodeError переводит ошибку разбора тела в 400 (или 413 для слишком большого тела).
-func writeDecodeError(w http.ResponseWriter, err error) {
+// shape — сообщение для тела не того вида (неизвестное поле, не тот тип, null).
+func writeDecodeError(w http.ResponseWriter, err error, shape string) {
 	var (
 		maxErr    *http.MaxBytesError
 		syntaxErr *json.SyntaxError
@@ -177,7 +215,6 @@ func writeDecodeError(w http.ResponseWriter, err error) {
 	default:
 		// Неизвестное поле, сумма не строкой, null, не тот тип. Текст ошибки декодера наружу
 		// не отдаём: в нём имена внутренних типов Go.
-		writeError(w, http.StatusBadRequest, codeInvalidBody,
-			`request body must be a JSON object with a single string field "amount"`)
+		writeError(w, http.StatusBadRequest, codeInvalidBody, shape)
 	}
 }

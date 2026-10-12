@@ -20,6 +20,10 @@ const (
 	// minInvoiceTTL — нижняя граница срока счёта. Срок короче секунды не имеет смысла, а срок
 	// меньше микросекунды округлился бы в базе до нуля: счёт рождался бы уже просроченным.
 	minInvoiceTTL = time.Second
+	// defaultScanInterval — пауза между проходами сканера блоков; minScanInterval — нижняя граница,
+	// чтобы сканер не засыпал сеть и базу запросами.
+	defaultScanInterval = time.Second
+	minScanInterval     = 100 * time.Millisecond
 	// Адрес контракта USDT (ERC-20) в основной сети Ethereum.
 	defaultUSDTContract = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
 )
@@ -37,6 +41,12 @@ type Config struct {
 	// AMLBlacklist — адреса отправителей с высоким риском для AML-мока
 	// (AML_BLACKLIST, через запятую). Адреса приведены к нижнему регистру.
 	AMLBlacklist []string
+	// ScanInterval — пауза между проходами сканера блоков (SCAN_INTERVAL, формат time.ParseDuration,
+	// не меньше 100ms).
+	ScanInterval time.Duration
+	// SimAPI — включать ли ручки управления симулятором сети /sim/* (SIM_API, по умолчанию false).
+	// Ручки открыты без входа и меняют «сеть», поэтому включают их только для проверки сценария.
+	SimAPI bool
 	// DemoSeed — создавать ли демо-партнёров при старте (DEMO_SEED, по умолчанию false).
 	// Их API-ключи публичны, поэтому включают только для разработки и проверки сценария.
 	DemoSeed bool
@@ -92,6 +102,27 @@ func load(getenv func(string) string) (Config, error) {
 		default:
 			cfg.InvoiceTTL = d
 		}
+	}
+
+	cfg.ScanInterval = defaultScanInterval
+	if v := get("SCAN_INTERVAL", ""); v != "" {
+		d, err := time.ParseDuration(v)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("SCAN_INTERVAL: %w", err))
+		case d < minScanInterval:
+			errs = append(errs, fmt.Errorf("SCAN_INTERVAL: must be at least %s, got %s", minScanInterval, d))
+		default:
+			cfg.ScanInterval = d
+		}
+	}
+
+	if v := get("SIM_API", ""); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("SIM_API: %q is not a boolean", v))
+		}
+		cfg.SimAPI = b
 	}
 
 	if v := get("DEMO_SEED", ""); v != "" {

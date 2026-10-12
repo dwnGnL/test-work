@@ -37,6 +37,9 @@ services:
       HTTP_ADDR: ":8080"
       CONFIRMATIONS: "3"
       INVOICE_TTL: 60m
+      # Ручки симулятора сети /sim/* (перевод, блоки, реорг). Открыты без входа, поэтому для
+      # реального окружения выключаются: SIM_API=false.
+      SIM_API: ${SIM_API:-true}
       # Демо-партнёры alpha и beta (ключи demo-key-alpha и demo-key-beta) для ручной проверки.
       DEMO_SEED: ${DEMO_SEED:-true}
       # Демо-адрес для проверки ветки «высокий риск»; можно переопределить через окружение.

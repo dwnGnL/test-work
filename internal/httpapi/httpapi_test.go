@@ -15,11 +15,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/dwnGnL/test-work/internal/chain"
 	"github.com/dwnGnL/test-work/internal/ledger"
 	"github.com/dwnGnL/test-work/internal/money"
 	"github.com/dwnGnL/test-work/internal/partners"
 	"github.com/dwnGnL/test-work/internal/platform/postgres"
 	"github.com/dwnGnL/test-work/internal/platform/postgres/pgtest"
+	"github.com/dwnGnL/test-work/internal/scanner"
 )
 
 // Интеграционные тесты на настоящей базе: нужен TEST_DATABASE_URL, иначе пропускаются (см. pgtest).
@@ -28,6 +30,7 @@ const (
 	keyAlpha  = "test-key-alpha"
 	keyBeta   = "test-key-beta"
 	testTTL   = 90 * time.Minute
+	testUSDT  = "0xdac17f958d2ee523a2206206994597c13d831ec7"
 	notFound  = `{"error":{"code":"not_found","message":"invoice not found"}}`
 	jsonType  = "application/json"
 	validBody = `{"amount":"100.000000"}`
@@ -38,13 +41,15 @@ var (
 	addressRe = regexp.MustCompile(`^0x[0-9a-f]{40}$`)
 )
 
-// fixture — база с двумя партнёрами (alpha: 1,5%, beta: 0,5%) и обработчик поверх неё.
+// fixture — база с двумя партнёрами (alpha: 1,5%, beta: 0,5%), симулятором сети со сканером
+// (порог — три подтверждения) и обработчик поверх неё.
 type fixture struct {
 	t     *testing.T
 	pool  *pgxpool.Pool
 	api   *API
 	h     http.Handler
 	logs  *bytes.Buffer
+	sc    *scanner.Scanner
 	alpha partners.Partner
 	beta  partners.Partner
 }
@@ -53,8 +58,13 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	pool := pgtest.NewMigrated(t)
 	logs := &bytes.Buffer{}
-	api := &API{db: pool, log: slog.New(slog.NewTextHandler(logs, nil)), invoiceTTL: testTTL, now: time.Now}
-	f := &fixture{t: t, pool: pool, api: api, h: api.routes(), logs: logs}
+	sim := chain.NewSimulator(pool)
+	api := &API{
+		db: pool, log: slog.New(slog.NewTextHandler(logs, nil)), invoiceTTL: testTTL, now: time.Now,
+		sim: sim, usdt: testUSDT,
+	}
+	sc := scanner.New(pool, sim, 3, testUSDT, slog.New(slog.DiscardHandler))
+	f := &fixture{t: t, pool: pool, api: api, h: api.routes(), logs: logs, sc: sc}
 	f.alpha = f.addPartner("alpha", keyAlpha, 150)
 	f.beta = f.addPartner("beta", keyBeta, 50)
 	return f
