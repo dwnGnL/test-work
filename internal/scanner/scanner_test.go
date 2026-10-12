@@ -429,6 +429,91 @@ func TestParentHashMismatchRestartsReconciliation(t *testing.T) {
 	f.assertCursor(2)
 }
 
+// Сеть переписана между сверкой и чтением головы, новая цепочка короче курсора сканера, и блоки
+// читать не нужно. Подтверждения считаются от курсора, который сначала проверяется по сети: платёж,
+// перевода которого в сети уже нет, не доходит до порога, хотя голова сети «набрала» подтверждения.
+func TestRewriteBelowCursorDoesNotConfirm(t *testing.T) {
+	f := newFixture(t)
+	inv := f.newInvoice()
+
+	f.send(usdtTo(t, inv.DepositAddress, "25"))
+	f.mine(7) // блок 1 с переводом, голова 7
+
+	// Первый проход обрывается на чтении блока 5: блоки 1-4 записаны, подтверждение не выполнялось.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	interrupted := &hookChain{Chain: f.sim, onBlock: func(number int64) {
+		if number == 5 {
+			cancel()
+		}
+	}}
+	if err := f.newScanner(interrupted).Tick(ctx); err == nil {
+		t.Fatal("the first pass finished without an error")
+	}
+	f.assertCursor(4)
+
+	// Второй проход: курсор сверен, и сразу после этого сеть выбрасывает всё вместе с переводом;
+	// новая цепочка из трёх блоков короче курсора (4), но у блока 1 при голове 3 «три подтверждения».
+	rewritten := false
+	network := &hookChain{Chain: f.sim, onHead: func() {
+		if rewritten {
+			return
+		}
+		rewritten = true
+		f.reorg(7, true)
+		f.mine(3)
+	}}
+	if err := f.newScanner(network).Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !rewritten {
+		t.Fatal("the test did not rewrite the chain")
+	}
+
+	if p := f.onlyPayment(inv); p.Status != payments.StatusOrphaned {
+		t.Errorf("payment = %+v, want orphaned: its transfer is not in the network", p)
+	}
+	f.assertHold(0)
+	f.assertCursor(3)
+}
+
+// Сеть переписана после чтения последнего блока: следующего блока, по parent_hash которого это
+// видно, ещё нет. Курсор проверяется перед подтверждением, и платёж из выброшенного блока
+// до порога не доходит.
+func TestRewriteAfterLastBlockDoesNotConfirm(t *testing.T) {
+	f := newFixture(t)
+	inv := f.newInvoice()
+
+	f.send(usdtTo(t, inv.DepositAddress, "25"))
+	f.mine(3) // блок 1 с переводом; у него три подтверждения
+
+	calls := 0
+	rewritten := false
+	network := &hookChain{Chain: f.sim, onTransfers: func(got []chain.Transfer) []chain.Transfer {
+		calls++
+		if calls != 3 {
+			return got
+		}
+		// События блока 3 прочитаны: сеть выбрасывает все три блока вместе с переводом.
+		rewritten = true
+		f.reorg(3, true)
+		f.mine(3)
+		return got
+	}}
+	if err := f.newScanner(network).Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !rewritten {
+		t.Fatal("the test did not rewrite the chain")
+	}
+
+	if p := f.onlyPayment(inv); p.Status != payments.StatusOrphaned {
+		t.Errorf("payment = %+v, want orphaned: its transfer is not in the network", p)
+	}
+	f.assertHold(0)
+	f.assertCursor(3)
+}
+
 // Если сеть переписывает цепочку при каждом чтении, проход заканчивается ошибкой, а не зацикливается.
 func TestUnstableChainStopsThePass(t *testing.T) {
 	f := newFixture(t)

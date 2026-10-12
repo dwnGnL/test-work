@@ -52,7 +52,8 @@ func New(pool *pgxpool.Pool, network chain.Chain, confirmations int, usdtContrac
 //     переводит платежи выброшенных блоков в orphaned;
 //  3. читает новые блоки по одному, от курсора до головы сети: переводы USDT на депозитные
 //     адреса счетов превращаются в платежи detected;
-//  4. переводит платежи, набравшие N подтверждений, в aml_pending (с проводкой в холд);
+//  4. проверяет, что курсор (последний обработанный блок) всё ещё в сети, и переводит платежи,
+//     набравшие N подтверждений от курсора, в aml_pending (с проводкой в холд);
 //  5. снимает блокировку и возвращает соединение в пул.
 //
 // Вся работа с базой в шагах 2-4 идёт через то же соединение, что держит блокировку. Оборвалось
@@ -105,7 +106,7 @@ func (s *Scanner) pass(ctx context.Context, conn *pgxpool.Conn) error {
 		if err := s.reconcile(ctx, conn); err != nil {
 			return err
 		}
-		head, stable, err := s.scanNew(ctx, conn)
+		cursor, stable, err := s.scanNew(ctx, conn)
 		if err != nil {
 			return err
 		}
@@ -113,9 +114,11 @@ func (s *Scanner) pass(ctx context.Context, conn *pgxpool.Conn) error {
 			continue
 		}
 
-		confirmed, err := payments.ConfirmReady(ctx, conn, head, s.confirmations)
+		// Подтверждения считаются от своего проверенного блока, а не от головы сети: голова
+		// могла измениться после сверки, и платёж из выброшенного блока нельзя продвигать по ней.
+		confirmed, err := payments.ConfirmReady(ctx, conn, cursor, s.confirmations)
 		if confirmed > 0 {
-			s.log.Info("payments reached the confirmation threshold", "count", confirmed, "head", head)
+			s.log.Info("payments reached the confirmation threshold", "count", confirmed, "cursor", cursor)
 		}
 		return err
 	}
@@ -195,11 +198,12 @@ func (s *Scanner) onNetwork(ctx context.Context, b chain.Block) (bool, error) {
 	return found && remote.Hash == b.Hash, nil
 }
 
-// scanNew — шаг 3: читает блоки по одному от курсора + 1 до головы сети. Возвращает голову, на
-// которой остановился. stable = false, если сеть переписала цепочку во время чтения (блока уже
-// нет или его parent_hash не совпал с нашим предыдущим блоком): нужна новая сверка.
-func (s *Scanner) scanNew(ctx context.Context, conn *pgxpool.Conn) (head int64, stable bool, err error) {
-	head, err = s.network.Head(ctx)
+// scanNew — шаг 3: читает блоки по одному от курсора + 1 до головы сети. Возвращает номер курсора —
+// последнего обработанного блока (0, если блоков нет): от него считаются подтверждения. stable = false,
+// если сеть переписала цепочку во время чтения (блока уже нет, его parent_hash не совпал с нашим
+// предыдущим блоком или сам курсор уже не лежит в сети): нужна новая сверка.
+func (s *Scanner) scanNew(ctx context.Context, conn *pgxpool.Conn) (cursor int64, stable bool, err error) {
+	head, err := s.network.Head(ctx)
 	if err != nil {
 		return 0, false, fmt.Errorf("scanner: head of the network: %w", err)
 	}
@@ -214,14 +218,23 @@ func (s *Scanner) scanNew(ctx context.Context, conn *pgxpool.Conn) (head int64, 
 			return 0, false, fmt.Errorf("scanner: block %d from the network: %w", number, err)
 		}
 		if !found || (hasPrev && b.ParentHash != prev.Hash) {
-			return head, false, nil
+			return 0, false, nil
 		}
 		if err := s.processBlock(ctx, conn, b); err != nil {
 			return 0, false, err
 		}
 		prev, hasPrev = b, true
 	}
-	return head, true, nil
+
+	// Курсор должен быть в сети и сейчас: цикл мог не выполниться (голова не выше курсора), а у
+	// последнего прочитанного блока ещё нет потомка, по которому parent_hash выдал бы подмену.
+	if hasPrev {
+		same, err := s.onNetwork(ctx, prev)
+		if err != nil || !same {
+			return 0, false, err
+		}
+	}
+	return prev.Number, true, nil
 }
 
 // processBlock обрабатывает блок целиком: запись о блоке и платежи по всем его переводам —
