@@ -218,17 +218,23 @@ func (s *Scanner) onNetwork(ctx context.Context, b chain.Block) (bool, error) {
 // нет, в том числе между заголовком и событиями, его parent_hash не совпал с нашим предыдущим
 // блоком или сам курсор уже не лежит в сети): нужна новая сверка.
 func (s *Scanner) scanNew(ctx context.Context, conn *pgxpool.Conn) (cursor int64, stable bool, err error) {
+	// Верхняя граница: номер последнего блока сети. Сами блоки отсюда не читаем, это только
+	// отметка, до которой идти.
 	head, err := s.network.Head(ctx)
 	if err != nil {
 		return 0, false, fmt.Errorf("scanner: head of the network: %w", err)
 	}
-	prev, hasPrev, err := selectLastBlock(ctx, conn) // без блоков prev.Number = 0: идём с первого
+	// Нижняя граница: наш последний обработанный блок, курсор. Пока своих блоков нет,
+	// prev.Number = 0 и чтение начинается с первого блока.
+	prev, hasPrev, err := selectLastBlock(ctx, conn)
 	if err != nil {
 		return 0, false, err
 	}
 
-	last := min(head, prev.Number+maxBlocksPerTick) // остальное дочитают следующие проходы
-	for number := prev.Number + 1; number <= last; number++ {
+	// Идём снизу вверх, от курсора + 1 к голове сети, но не дальше лимита на проход:
+	// остальное дочитают следующие проходы. prev сдвигается вместе с чтением.
+	until := min(head, prev.Number+maxBlocksPerTick)
+	for number := prev.Number + 1; number <= until; number++ {
 		b, found, err := s.network.Block(ctx, number)
 		if err != nil {
 			return 0, false, fmt.Errorf("scanner: block %d from the network: %w", number, err)
