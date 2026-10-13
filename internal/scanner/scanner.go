@@ -249,7 +249,9 @@ func (s *Scanner) scanNew(ctx context.Context, conn *pgxpool.Conn) (cursor int64
 		if err != nil {
 			return 0, false, err
 		}
-		prev, hasPrev = b, true
+		// Прочитанный блок становится предыдущим для следующего шага цикла.
+		prev = b
+		hasPrev = true
 	}
 
 	// Курсор должен быть в сети и сейчас: цикл мог не выполниться (голова не выше курсора), а у
