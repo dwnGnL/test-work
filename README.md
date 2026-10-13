@@ -65,14 +65,17 @@ new_invoice() {
   ADDR=$(echo "$RESP" | sed -E 's/.*"deposit_address":"([^"]+)".*/\1/')
   echo "$RESP"
 }
-pay()     { curl -s -X POST $API/sim/transfers -d "{\"to\":\"$ADDR\",\"from\":\"$1\",\"amount\":\"$2\"}"; echo; }
+need_invoice() { [ -n "$ADDR" ] || { echo "Сначала создайте счёт в этом же окне терминала: new_invoice order-1 100"; return 1; }; }
+pay()     { need_invoice && { curl -s -X POST $API/sim/transfers -d "{\"to\":\"$ADDR\",\"from\":\"$1\",\"amount\":\"$2\"}"; echo; }; }
 blocks()  { curl -s -X POST $API/sim/blocks -d "{\"count\":$1}"; echo; sleep 3; }
-invoice() { curl -s $API/v1/invoices/$ID -H "$KEY"; echo; }
+invoice() { need_invoice && { curl -s $API/v1/invoices/$ID -H "$KEY"; echo; }; }
 balance() { curl -s $API/v1/balance -H "$KEY"; echo; }
 ```
 
-- `new_invoice ключ сумма` создаёт счёт и запоминает его номер и депозитный адрес;
-- `pay адрес_отправителя сумма` — перевод USDT на адрес последнего счёта;
+- `new_invoice ключ сумма` создаёт счёт и запоминает его номер и депозитный адрес в переменных
+  `ID` и `ADDR`. Они живут только в том окне терминала, где счёт создан;
+- `pay адрес_отправителя сумма` — перевод USDT на адрес последнего счёта. Без созданного счёта
+  обёртка подскажет, что сначала нужен `new_invoice`;
 - `blocks N` добывает N блоков и ждёт три секунды: сканер и обработчик работают в фоне раз
   в секунду, им нужно время.
 
