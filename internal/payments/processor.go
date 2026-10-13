@@ -128,10 +128,13 @@ func (p *Processor) decide(ctx context.Context, pay Payment, verdict aml.Verdict
 	}
 
 	err = postgres.InTx(ctx, p.pool, func(tx pgx.Tx) error {
-		// Условная смена статуса: строка не изменилась — платёж уже решён, выходим без проводок.
+		// Условная смена статуса.
 		moved, err := markDecided(ctx, tx, pay.ID, status, verdict, p.now())
-		if err != nil || !moved {
+		if err != nil {
 			return err
+		}
+		if !moved {
+			return nil // строка не изменилась: платёж уже решён другим воркером, проводок не делаем
 		}
 		decided = true
 

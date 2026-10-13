@@ -169,8 +169,11 @@ func ConfirmReady(ctx context.Context, db DB, head int64, confirmations int) (co
 func confirmOne(ctx context.Context, db DB, id, maxBlock int64) (moved bool, err error) {
 	err = postgres.InTx(ctx, db, func(tx pgx.Tx) error {
 		amount, ok, err := markAMLPending(ctx, tx, id, maxBlock)
-		if err != nil || !ok {
+		if err != nil {
 			return err
+		}
+		if !ok {
+			return nil // строка не изменилась: платёж уже обработан или больше не готов
 		}
 		moved = true
 		// posted = false значит, что проводка с этим ключом и содержимым уже есть; это не ошибка,

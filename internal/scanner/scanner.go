@@ -138,12 +138,18 @@ func (s *Scanner) pass(ctx context.Context, conn *pgxpool.Conn) error {
 // общего предка и откатываемся до него.
 func (s *Scanner) reconcile(ctx context.Context, conn *pgxpool.Conn) error {
 	last, found, err := selectLastBlock(ctx, conn)
-	if err != nil || !found {
-		return err // блоков ещё нет: сверять нечего
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil // своих блоков ещё нет: сверять нечего
 	}
 	same, err := s.onNetwork(ctx, last)
-	if err != nil || same {
+	if err != nil {
 		return err
+	}
+	if same {
+		return nil // последний блок совпал с сетью: реорга не было
 	}
 
 	// Общий предок: ближайший к концу свой блок, который есть в сети с тем же хэшем.
@@ -244,8 +250,11 @@ func (s *Scanner) scanNew(ctx context.Context, conn *pgxpool.Conn) (cursor int64
 	// последнего прочитанного блока ещё нет потомка, по которому parent_hash выдал бы подмену.
 	if hasPrev {
 		same, err := s.onNetwork(ctx, prev)
-		if err != nil || !same {
+		if err != nil {
 			return 0, false, err
+		}
+		if !same {
+			return 0, false, nil // курсора в сети уже нет: нужна новая сверка
 		}
 	}
 	return prev.Number, true, nil
@@ -293,8 +302,11 @@ func (s *Scanner) detect(ctx context.Context, tx pgx.Tx, b chain.Block, t chain.
 		return false, nil
 	}
 	inv, found, err := invoices.FindByDepositAddress(ctx, tx, t.To)
-	if err != nil || !found {
+	if err != nil {
 		return false, err
+	}
+	if !found {
+		return false, nil // получатель — не депозитный адрес нашего счёта
 	}
 
 	err = payments.Detect(ctx, tx, payments.DetectParams{

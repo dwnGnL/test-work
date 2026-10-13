@@ -54,8 +54,11 @@ func Create(ctx context.Context, tx pgx.Tx, p CreateParams) (r Refund, created b
 	p.ToAddress = strings.ToLower(p.ToAddress)
 
 	r, inserted, err := insertRefund(ctx, tx, p)
-	if err != nil || inserted {
-		return r, inserted, err
+	if err != nil {
+		return Refund{}, false, err
+	}
+	if inserted {
+		return r, true, nil
 	}
 	// Возврат уже есть: отдаём его, второй не создаётся.
 	r, err = selectByPayment(ctx, tx, p.PaymentID)
